@@ -5,11 +5,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import test functions from other modules
-from utilities import test_check_server_time, test_get_exchange_info, test_get_ticker
+from utilities import (
+    test_check_server_time,
+    test_get_exchange_info,
+    test_get_pending_count,
+    test_get_available_sub,
+    test_get_ticker,
+)
 from balance import test_get_balance
 from trades import test_place_order, test_query_order, test_cancel_order
 from portfolio_worth import test_get_portfolio_worth
 from purchase_by_value import test_buy_coin_by_value
+from shorts import test_close_short, test_get_short_positions, test_open_short
 
 
 def display_menu():
@@ -27,6 +34,11 @@ def display_menu():
     print("8. Cancel Orders")
     print("9. Get Portfolio Worth (USD)")
     print("10. Buy Coin By USD Value (MARKET)")
+    print("11. Get Pending Order Count")
+    print("12. Get Available Subscriptions")
+    print("13. Get Open Short Positions")
+    print("14. Open Short Position")
+    print("15. Close Short Position")
     print("0. Exit")
     print("="*50)
 
@@ -114,7 +126,7 @@ def main():
         display_menu()
         
         try:
-            choice = get_user_input("Enter your choice (0-10): ", int)
+            choice = get_user_input("Enter your choice (0-15): ", int)
             
             if choice == 0:
                 print("\nExiting... Goodbye!")
@@ -166,8 +178,35 @@ def main():
                     continue
                 print("\n[ORDERS] Buying coin by USD value...")
                 test_buy_coin_by_value()
+            elif choice == 11:
+                if not env_ok:
+                    print("\n[ERROR] Cannot get pending order count without proper API credentials.")
+                    continue
+                print("\n[ORDERS] Getting pending order count...")
+                test_get_pending_count()
+            elif choice == 12:
+                print("\n[DATA] Getting available subscriptions...")
+                test_get_available_sub()
+            elif choice == 13:
+                if not env_ok:
+                    print("\n[ERROR] Cannot get short positions without proper API credentials.")
+                    continue
+                print("\n[POSITIONS] Getting open short positions...")
+                test_get_short_positions()
+            elif choice == 14:
+                if not env_ok:
+                    print("\n[ERROR] Cannot open a short without proper API credentials.")
+                    continue
+                print("\n[POSITIONS] Opening short position...")
+                test_open_short()
+            elif choice == 15:
+                if not env_ok:
+                    print("\n[ERROR] Cannot close a short without proper API credentials.")
+                    continue
+                print("\n[POSITIONS] Closing short position...")
+                test_close_short()
             else:
-                print("\n[ERROR] Invalid choice. Please enter a number between 0-10.")
+                print("\n[ERROR] Invalid choice. Please enter a number between 0-15.")
                 
         except KeyboardInterrupt:
             print("\n\nOperation cancelled by user. Exiting...")

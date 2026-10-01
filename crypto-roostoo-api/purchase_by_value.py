@@ -2,7 +2,7 @@ import time
 from typing import Any, Dict, Optional
 
 from trades import place_order
-from utilities import get_ticker
+from utilities import get_amount_precision, get_mini_order, get_ticker
 
 
 def _normalize_pair(pair_or_coin: str) -> str:
@@ -46,8 +46,13 @@ def _calculate_quantity_with_step_size_reduction(
     usd_value: float,
     reference_price: float,
     attempt: int,
+    amount_precision: Optional[int] = None,
 ) -> float:
     base_quantity = usd_value / reference_price
+
+    if amount_precision is not None:
+        scale = 10 ** amount_precision
+        return max(0.0, int(base_quantity * scale) / scale)
 
     if reference_price > 50000:
         strategies = [
@@ -122,6 +127,14 @@ def buy_coin_by_value(
     if reference_price is None or reference_price <= 0:
         raise RuntimeError(f"Failed to fetch valid market price for {pair}")
 
+    mini_order = get_mini_order(pair)
+    if mini_order is not None and usd_value < mini_order:
+        raise ValueError(
+            f"usd_value must be at least the pair minimum order value of {mini_order}"
+        )
+
+    amount_precision = get_amount_precision(pair)
+
     response = None
     quantity = 0.0
     attempts: list[Dict[str, Any]] = []
@@ -134,7 +147,12 @@ def buy_coin_by_value(
         current_usd_value = usd_value * reduction_factors[min(attempt, len(reduction_factors) - 1)]
         
         # Calculate quantity using default step size reducer
-        trial_quantity = _calculate_quantity_with_step_size_reduction(current_usd_value, reference_price, attempt)
+        trial_quantity = _calculate_quantity_with_step_size_reduction(
+            current_usd_value,
+            reference_price,
+            attempt,
+            amount_precision=amount_precision,
+        )
 
         if trial_quantity <= 0:
             continue

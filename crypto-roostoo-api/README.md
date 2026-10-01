@@ -9,7 +9,12 @@ Python client for the Roostoo simulated crypto exchange API. Used by `live_bot.p
 - `get_server_timestamp()` — Fetches server time to avoid clock sync issues with HMAC signatures.
 - `check_server_time()` — Returns the raw server time response.
 - `get_exchange_info()` — Returns exchange metadata (available pairs, initial wallet, running status).
+- `get_trade_pair_info(pair)` — Returns exchange rules for one pair.
+- `get_amount_precision(pair)` — Returns the pair's exchange-defined quantity precision.
+- `get_mini_order(pair)` — Returns the pair's minimum order notional.
 - `get_ticker(pair=None)` — Fetches current market prices. Pass a pair like `"BTC/USD"` for a specific coin, or `None` for all.
+- `get_pending_count()` — Returns the number of pending orders.
+- `get_available_sub()` — Returns legacy WebSocket subscription capabilities when supported by the server.
 
 ### `balance.py` — Account Balance
 
@@ -18,8 +23,17 @@ Python client for the Roostoo simulated crypto exchange API. Used by `live_bot.p
 ### `trades.py` — Order Management
 
 - `place_order(pair_or_coin, side, quantity, price=None, order_type=None)` — Place MARKET or LIMIT orders. Auto-detects order type if not specified.
-- `query_order(order_id=None, pair=None, pending_only=None)` — Query existing orders.
+- `query_order(order_id=None, pair=None, pending_only=None, offset=None, limit=None)` — Query existing orders with optional pagination.
 - `cancel_order(order_id=None, pair=None)` — Cancel orders by ID, pair, or all.
+
+### `shorts.py` — Short Positions
+
+- `open_short(pair_or_coin, collateral, price=None)` — Open or add to a market or limit short.
+- `close_short(pair_or_coin, close_qty=None, close_pct=None)` — Partially or fully close a short.
+- `get_short_positions()` — Get open shorts and live unrealized P&L.
+
+Short requests use the documented `/v6` endpoints and the same HMAC authentication as spot trading.
+Quantities and limit prices are floored using `AmountPrecision` and `PricePrecision` from `exchangeInfo`.
 
 ### `portfolio_worth.py` — Portfolio Valuation
 

@@ -55,7 +55,7 @@ def get_balance():
 def test_get_balance():
     print("--- Getting Balance ---")
     balance = get_balance()
-    balance = balance.get('SpotWallet', {})
+    balance = (balance or {}).get('Wallet', {})
     for coin in balance:
         print(f"{coin} Free: {balance.get(coin, {}).get('Free')} Locked: {balance.get(coin, {}).get('Lock')}")
     # print(balance)

@@ -2,10 +2,10 @@ import os
 from dotenv import load_dotenv
 import requests
 import time
-import math
 import hmac
 import hashlib
-from utilities import get_server_timestamp
+from decimal import Decimal, ROUND_DOWN
+from utilities import get_amount_precision, get_server_timestamp, get_trade_pair_info
 
 # Load environment variables
 load_dotenv()
@@ -29,13 +29,20 @@ def _is_success_response(response):
 
 
 def _floor_to_decimals(value, decimals):
-    factor = 10 ** decimals
-    return math.floor(value * factor) / factor
+    scale = Decimal(1).scaleb(-decimals)
+    return float(Decimal(str(value)).quantize(scale, rounding=ROUND_DOWN))
 
 
-def _calculate_sell_quantity_with_step_size_reduction(base_quantity, attempt):
+def _calculate_sell_quantity_with_step_size_reduction(
+    base_quantity, attempt, amount_precision=None
+):
     if base_quantity <= 0:
         return 0.0
+
+    if amount_precision is not None:
+        reduction_factors = [1.0, 0.995, 0.99, 0.98, 0.95, 0.90]
+        factor = reduction_factors[min(attempt, len(reduction_factors) - 1)]
+        return float(_floor_to_decimals(base_quantity * factor, amount_precision))
 
     decimal_steps = [6, 5, 4, 3, 2, 1, 0]
     if attempt < len(decimal_steps):
@@ -66,12 +73,19 @@ def place_order(pair_or_coin, side, quantity, price=None, order_type=None):
     url = f"{BASE_URL}/v3/place_order"
 
     # 1. Determine the full pair name
-    pair = f"{pair_or_coin}/USD" if "/" not in pair_or_coin else pair_or_coin
+    pair = str(pair_or_coin).strip().upper()
+    pair = pair if "/" in pair else f"{pair}/USD"
 
     # 2. Auto-detect order_type if it's not specified
     if order_type is None:
         order_type = "LIMIT" if price is not None else "MARKET"
         print(f"Auto-detected order type: {order_type}")
+    order_type = order_type.upper()
+    side = side.upper()
+    if side not in {'BUY', 'SELL'}:
+        raise ValueError("side must be BUY or SELL")
+    if order_type not in {'LIMIT', 'MARKET'}:
+        raise ValueError("order_type must be LIMIT or MARKET")
 
     # 3. Validate parameters to prevent errors
     if order_type == 'LIMIT' and price is None:
@@ -80,19 +94,65 @@ def place_order(pair_or_coin, side, quantity, price=None, order_type=None):
     if order_type == 'MARKET' and price is not None:
         print("Warning: Price is provided for a MARKET order and will be ignored by the API.")
 
-    # Use server timestamp to avoid time sync issues  
+    try:
+        normalized_quantity = float(quantity)
+    except (TypeError, ValueError) as e:
+        raise ValueError("quantity must be numeric") from e
+    if normalized_quantity <= 0:
+        raise ValueError("quantity must be greater than 0")
+
+    pair_info = get_trade_pair_info(pair) or {}
+    amount_precision = pair_info.get('AmountPrecision')
+    price_precision = pair_info.get('PricePrecision')
+    try:
+        amount_precision = int(amount_precision)
+    except (TypeError, ValueError):
+        amount_precision = None
+    try:
+        price_precision = int(price_precision)
+    except (TypeError, ValueError):
+        price_precision = None
+
+    if amount_precision is not None:
+        normalized_quantity = _floor_to_decimals(normalized_quantity, amount_precision)
+        if normalized_quantity <= 0:
+            raise ValueError("quantity is below the pair amount precision")
+
+    normalized_price = price
+    if price is not None and price_precision is not None:
+        try:
+            normalized_price = _floor_to_decimals(float(price), price_precision)
+        except (TypeError, ValueError) as e:
+            raise ValueError("price must be numeric") from e
+        if normalized_price <= 0:
+            raise ValueError("price is below the pair price precision")
+
+    minimum_order = pair_info.get('MiniOrder')
+    try:
+        minimum_order = float(minimum_order)
+    except (TypeError, ValueError):
+        minimum_order = None
+    if (
+        order_type == 'LIMIT'
+        and minimum_order is not None
+        and normalized_quantity * normalized_price < minimum_order
+    ):
+        raise ValueError(
+            f"order notional must be at least the pair minimum order value of {minimum_order}"
+        )
+
     timestamp = get_server_timestamp()
 
     # 4. Create the request payload
     payload = {
         'pair': pair,
-        'side': side.upper(),
-        'type': order_type.upper(),
-        'quantity': str(quantity),
+        'side': side,
+        'type': order_type,
+        'quantity': str(normalized_quantity),
         'timestamp': timestamp
     }
     if order_type == 'LIMIT':
-        payload['price'] = str(price)
+        payload['price'] = str(normalized_price)
 
     def _submit_order(payload_to_send):
         query_string = "&".join([f"{key}={value}" for key, value in sorted(payload_to_send.items())])
@@ -120,7 +180,7 @@ def place_order(pair_or_coin, side, quantity, price=None, order_type=None):
             print("Error: Failed to parse JSON response")
             return None
 
-    is_sell_market = side.upper() == "SELL" and order_type.upper() == "MARKET"
+    is_sell_market = side.upper() == "SELL" and order_type == "MARKET"
     try:
         base_quantity = float(quantity)
     except (TypeError, ValueError):
@@ -129,10 +189,12 @@ def place_order(pair_or_coin, side, quantity, price=None, order_type=None):
     if is_sell_market and base_quantity > 0:
         max_attempts = 12
         last_response = None
+        sell_amount_precision = get_amount_precision(pair)
         for attempt in range(max_attempts):
             trial_quantity = _calculate_sell_quantity_with_step_size_reduction(
                 base_quantity=base_quantity,
                 attempt=attempt,
+                amount_precision=sell_amount_precision,
             )
             if trial_quantity <= 0:
                 continue
@@ -214,20 +276,23 @@ def test_place_order(testnum):
         print("Incorrect test number (0-3)")
 
 
-def query_order(order_id=None, pair=None, pending_only=None):
+def query_order(order_id=None, pair=None, pending_only=None, offset=None, limit=None):
     """Queries orders. (Auth: RCL_TopLevelCheck)"""
     url = f"{BASE_URL}/v3/query_order"
     
     # Use server timestamp to avoid time sync issues
     timestamp = get_server_timestamp()
     payload = {}
-    if order_id:
+    if order_id is not None:
         payload['order_id'] = str(order_id)
     elif pair: # Docs say order_id and pair cannot be sent together
         payload['pair'] = pair
-        if pending_only is not None:
-             # Docs specify STRING_BOOL
-            payload['pending_only'] = 'TRUE' if pending_only else 'FALSE'
+    if order_id is None and pending_only is not None:
+        payload['pending_only'] = 'TRUE' if pending_only else 'FALSE'
+    if order_id is None and offset is not None:
+        payload['offset'] = str(offset)
+    if order_id is None and limit is not None:
+        payload['limit'] = str(limit)
     payload['timestamp'] = timestamp
                 
     # === Create signature ===
@@ -258,7 +323,8 @@ def test_query_order(coin=None):
     if coin is None:
         coin = "BTC"
     print(f"--- Querying Pending {coin} Orders ---")
-    orders = query_order(pair=f"{coin}/USD", pending_only=True)
+    pair = coin if "/" in coin else f"{coin}/USD"
+    orders = query_order(pair=pair, pending_only=True)
     if orders and orders.get('Success'):
         print(f"Found {len(orders.get('OrderMatched', []))} matching orders.")
         for n in orders.get('OrderMatched', []):
@@ -274,7 +340,7 @@ def cancel_order(order_id=None, pair=None):
     # Use server timestamp to avoid time sync issues
     timestamp = get_server_timestamp()
     payload = {}
-    if order_id:
+    if order_id is not None:
         payload['order_id'] = str(order_id)
     elif pair: # Docs say only one is allowed
         payload['pair'] = pair
@@ -307,9 +373,12 @@ def cancel_order(order_id=None, pair=None):
 
 def test_cancel_order(coin=None):
     if coin is None:
-        coin = "No Coin Selected"
-    print(f"\n--- 8. Canceling order {coin} ---")
-    cancel_result = cancel_order(pair=f"{coin}/USD")
+        print("\n--- 8. Canceling all pending orders ---")
+        cancel_result = cancel_order()
+    else:
+        pair = coin if "/" in coin else f"{coin}/USD"
+        print(f"\n--- 8. Canceling order {pair} ---")
+        cancel_result = cancel_order(pair=pair)
     if cancel_result:
         print(f"Cancel Success: {cancel_result.get('Success')}")
         print(f"Canceled List: {cancel_result.get('CanceledList')}")

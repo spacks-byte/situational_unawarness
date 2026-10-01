@@ -53,7 +53,7 @@ def get_portfolio_worth(include_zero_balances: bool = False) -> Dict[str, Any]:
     Returns a dictionary with per-asset valuation and the total USD value.
     """
     balance = get_balance() or {}
-    wallet = balance.get("SpotWallet", {})
+    wallet = balance.get("Wallet", {})
 
     if not isinstance(wallet, dict):
         return {
