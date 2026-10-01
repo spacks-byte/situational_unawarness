@@ -9,7 +9,6 @@ from utilities import (
     test_check_server_time,
     test_get_exchange_info,
     test_get_pending_count,
-    test_get_available_sub,
     test_get_ticker,
 )
 from balance import test_get_balance
@@ -35,10 +34,9 @@ def display_menu():
     print("9. Get Portfolio Worth (USD)")
     print("10. Buy Coin By USD Value (MARKET)")
     print("11. Get Pending Order Count")
-    print("12. Get Available Subscriptions")
-    print("13. Get Open Short Positions")
-    print("14. Open Short Position")
-    print("15. Close Short Position")
+    print("12. Get Open Short Positions")
+    print("13. Open Short Position")
+    print("14. Close Short Position")
     print("0. Exit")
     print("="*50)
 
@@ -126,7 +124,7 @@ def main():
         display_menu()
         
         try:
-            choice = get_user_input("Enter your choice (0-15): ", int)
+            choice = get_user_input("Enter your choice (0-14): ", int)
             
             if choice == 0:
                 print("\nExiting... Goodbye!")
@@ -185,28 +183,25 @@ def main():
                 print("\n[ORDERS] Getting pending order count...")
                 test_get_pending_count()
             elif choice == 12:
-                print("\n[DATA] Getting available subscriptions...")
-                test_get_available_sub()
-            elif choice == 13:
                 if not env_ok:
                     print("\n[ERROR] Cannot get short positions without proper API credentials.")
                     continue
                 print("\n[POSITIONS] Getting open short positions...")
                 test_get_short_positions()
-            elif choice == 14:
+            elif choice == 13:
                 if not env_ok:
                     print("\n[ERROR] Cannot open a short without proper API credentials.")
                     continue
                 print("\n[POSITIONS] Opening short position...")
                 test_open_short()
-            elif choice == 15:
+            elif choice == 14:
                 if not env_ok:
                     print("\n[ERROR] Cannot close a short without proper API credentials.")
                     continue
                 print("\n[POSITIONS] Closing short position...")
                 test_close_short()
             else:
-                print("\n[ERROR] Invalid choice. Please enter a number between 0-15.")
+                print("\n[ERROR] Invalid choice. Please enter a number between 0-14.")
                 
         except KeyboardInterrupt:
             print("\n\nOperation cancelled by user. Exiting...")

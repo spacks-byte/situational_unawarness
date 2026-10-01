@@ -136,25 +136,6 @@ def test_get_ticker(coin=None):
             print(f"{coin} Last Price: {ticker_btc.get('Data', {}).get(coin, {}).get('LastPrice')}")
 
 
-def get_available_sub():
-    """Get available legacy WebSocket subscription topics."""
-    url = f"{BASE_URL}/v3/available_sub"
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Error getting available subscriptions: {e}")
-        return None
-
-
-def test_get_available_sub():
-    print("--- Getting Available Subscriptions ---")
-    result = get_available_sub()
-    if result:
-        print(f"Available subscriptions: {result.get('AvailableSub', {})}")
-
-
 def get_pending_count():
     """Get the number of pending orders. (Auth: RCL_TopLevelCheck)"""
     url = f"{BASE_URL}/v3/pending_count"

@@ -14,7 +14,6 @@ Python client for the Roostoo simulated crypto exchange API. Used by `live_bot.p
 - `get_mini_order(pair)` — Returns the pair's minimum order notional.
 - `get_ticker(pair=None)` — Fetches current market prices. Pass a pair like `"BTC/USD"` for a specific coin, or `None` for all.
 - `get_pending_count()` — Returns the number of pending orders.
-- `get_available_sub()` — Returns legacy WebSocket subscription capabilities when supported by the server.
 
 ### `balance.py` — Account Balance
 
