@@ -1,0 +1,51 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
+from src.engine.clock import Clock, RealClock
+from src.engine.execution.runner import ExecutionRunner
+from src.engine.monitor.position_monitor import PositionMonitor
+from src.engine.reconcile.pending import cancel_stale_orders
+from src.engine.schema.models import TargetPortfolio
+from src.engine.state.snapshot import read_exchange_snapshot
+
+
+class EngineRuntime:
+    """Clock-driven orchestration shared by live execution and backtests."""
+
+    def __init__(self, runner: ExecutionRunner, *, clock: Clock | None = None, poll_interval_seconds: int = 5, monitor: PositionMonitor | None = None, pending_timeout_seconds: int | None = None) -> None:
+        self.runner = runner
+        self.clock = clock or RealClock()
+        self.poll_interval_seconds = poll_interval_seconds
+        self.monitor = monitor
+        self.pending_timeout_seconds = pending_timeout_seconds or runner.config.fill_timeout_seconds
+
+    def run_once(self, strategy: Callable[[dict[str, Any]], TargetPortfolio]) -> dict[str, Any]:
+        cancel_stale_orders(self.runner.port, self.clock, self.pending_timeout_seconds)
+        snapshot = read_exchange_snapshot(self.runner.port)
+        target = strategy(snapshot)
+        alerts = self.monitor.evaluate(target, snapshot.get("prices", {}), snapshot.get("entry_prices", {})) if self.monitor else []
+        if alerts:
+            flatten = list(target.flatten)
+            flatten.extend(alert["symbol"] for alert in alerts)
+            target = target.model_copy(update={"flatten": list(dict.fromkeys(flatten))})
+        result = self.runner.execute(target, snapshot, snapshot["equity_usd"])
+        if alerts:
+            result["alerts"] = alerts
+        return result
+
+    def run(
+        self,
+        strategy: Callable[[dict[str, Any]], TargetPortfolio],
+        *,
+        max_iterations: int | None = None,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        iteration = 0
+        while max_iterations is None or iteration < max_iterations:
+            results.append(self.run_once(strategy))
+            iteration += 1
+            if max_iterations is None or iteration < max_iterations:
+                self.clock.sleep(self.poll_interval_seconds)
+        return results
