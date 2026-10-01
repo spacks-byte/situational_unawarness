@@ -1,1 +1,11 @@
 .env
+
+# Downloaded market data
+data/
+
+# Backtest outputs
+results/
+
+# Python cache
+__pycache__/
+*.pyc
