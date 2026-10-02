@@ -9,3 +9,11 @@ results/
 # Python cache
 __pycache__/
 *.pyc
+
+# Local engine state / runtime files
+*.db
+*.jsonl
+KILL
+.pytest_cache/
+*.env
+!.env.example

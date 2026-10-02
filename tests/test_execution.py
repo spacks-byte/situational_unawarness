@@ -146,3 +146,17 @@ def test_high_urgency_routes_limit_target_as_market_order():
 
     assert result["status"] == "EXECUTED"
     assert result["operations"][0]["response"]["OrderDetail"]["Type"] == "MARKET"
+
+
+def test_full_long_exit_sells_the_exact_holding_even_if_the_price_ticked_down():
+    from src.engine.execution.runner import ExecutionRunner
+    from src.engine.state.snapshot import read_exchange_snapshot
+
+    port = MockExchangePort(initial_wallet={"USD": 0.0, "ETH": 0.5}, tickers={"ETH/USD": 2000.0})
+    snap = read_exchange_snapshot(port)
+    port.tickers["ETH/USD"] = 1900.0                       # moves after the snapshot, before the sell
+    runner = ExecutionRunner(port, IntentJournal(memory=True), ExecutionConfig(dry_run=False))
+    target = TargetPortfolio(strategy_id="t", strategy_version="v", signal_id="exit", timestamp=datetime.now(UTC))
+    result = runner.execute(target, snap, snap["equity_usd"])
+    assert {op["status"] for op in result["operations"]} == {"RESOLVED"}      # sliced into child orders
+    assert abs(port.wallet["ETH"]) < 1e-12

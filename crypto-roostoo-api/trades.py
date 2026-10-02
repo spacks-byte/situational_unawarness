@@ -28,6 +28,11 @@ def _is_success_response(response):
     return response.get("Success") is True and str(response.get("ErrMsg", "")) == ""
 
 
+def _plain(value):
+    """Number as a plain decimal string: str(5.861e-05) is '5.861e-05', which is not a valid price field."""
+    return format(Decimal(str(value)), 'f')
+
+
 def _floor_to_decimals(value, decimals):
     scale = Decimal(1).scaleb(-decimals)
     return float(Decimal(str(value)).quantize(scale, rounding=ROUND_DOWN))
@@ -148,11 +153,11 @@ def place_order(pair_or_coin, side, quantity, price=None, order_type=None):
         'pair': pair,
         'side': side,
         'type': order_type,
-        'quantity': str(normalized_quantity),
+        'quantity': _plain(normalized_quantity),
         'timestamp': timestamp
     }
     if order_type == 'LIMIT':
-        payload['price'] = str(normalized_price)
+        payload['price'] = _plain(normalized_price)
 
     def _submit_order(payload_to_send):
         query_string = "&".join([f"{key}={value}" for key, value in sorted(payload_to_send.items())])
@@ -206,7 +211,7 @@ def place_order(pair_or_coin, side, quantity, price=None, order_type=None):
                 )
 
             trial_payload = dict(payload)
-            trial_payload["quantity"] = str(trial_quantity)
+            trial_payload["quantity"] = _plain(trial_quantity)
             last_response = _submit_order(trial_payload)
 
             if _is_success_response(last_response):

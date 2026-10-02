@@ -2,6 +2,30 @@
 
 This repository contains a production-oriented order execution engine for Roostoo strategies. It accepts a desired `TargetPortfolio`, compares it with normalized account state, applies risk controls, and sends only the required exchange actions.
 
+## Strategy: RXM (Residual Cross-sectional Momentum)
+
+The trading strategy this engine runs in the competition. Spec, math and evidence: `docs/STRATEGY_SPEC.md`.
+
+- **Signal.** Every coin's own trend, with its BTC beta removed, over 3, 7 and 14 days. It is
+  volatility-normalised and z-scored across coins.
+- **Book.** Long the top 3, short the bottom 3, inverse-vol weights. Competition mode is 65% long /
+  35% short, rebalanced daily at 00:00 UTC with 5 bp passive limits. Once the account is up +5%, all
+  weights are cut to 30% to protect Sharpe, Sortino and Calmar.
+
+| Piece | Path |
+|---|---|
+| Strategy and frozen presets (`comp`, `neutral`) | `backtest/strategies/rxm.py` |
+| Backtest presets / what-ifs | `python -m backtest.experiments` |
+| Grid search with a train/validate split | `python -m backtest.tune` (guide: `docs/TUNING.md`) |
+| Live adapter: weights → `TargetPortfolio` | `src/strategy_bridge/` (`competition_config.yaml`) |
+| Pre-trade guard (16 checks) | `src/guard/checks.py` |
+| Dashboard | `python -m dashboard.build` (`docs/DASHBOARD.md`) |
+| Offline live-engine replay / live runner | `scripts/run_comp_mock.py` / `scripts/run_live.py` (`docs/LIVE_RUNBOOK.md`) |
+
+```bash
+python -m backtest.run --strategy rxm --params k=3,tilt=0.3 --symbols BTC,ETH,SOL,BNB,XRP,DOGE,ADA,AVAX,LINK,LTC --start 2025-06-01
+```
+
 ## Architecture
 
 ```text

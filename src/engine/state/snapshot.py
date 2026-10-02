@@ -12,7 +12,8 @@ def normalize_exchange_snapshot(
 ) -> dict[str, Any]:
     """Normalize live or simulated exchange responses into engine state."""
 
-    wallet = (balance or {}).get("Wallet", {})
+    balance = balance or {}
+    wallet = balance.get("Wallet") or balance.get("SpotWallet") or {}   # the API has used both names
     ticker_data = (tickers or {}).get("Data", tickers or {})
     cash_usd = 0.0
     longs: dict[str, float] = {}

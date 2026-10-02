@@ -16,8 +16,18 @@ class BacktestConfig:
     initial_cash: float = 100_000.0  # competition starting portfolio
     maker_fee: float = 0.0005        # limit orders (0.05%)
     taker_fee: float = 0.001         # market orders (0.1%): short covers and liquidations only
+    short_open_fee: float = 0.001    # Roostoo /v6/short_open charges 0.1% flat, limit or market
     limit_offset_bps: float = 0.0    # buys rest this far below the last close, sells above
     limit_fill: str = "through"      # "through": price must trade past the limit; "touch": reaching it is enough
+    # Competition "lock-in" overlay (path-dependent, uses only realised equity): once the return since
+    # trade start reaches lockin_return, scale all target weights by lockin_scale for the rest of the run.
+    lockin_return: float = 0.0       # 0 = off
+    lockin_scale: float = 0.3
+    gap_improvement: bool = True     # True: a limit the open gapped past fills at the better open price.
+                                     # False (conservative): it fills at the limit price.
+    latency_bars: int = 0            # stress test: limit prices are this many bars stale when the order arrives.
+                                     # A limit the market has already crossed by then fills at the limit price
+                                     # (no improvement) and pays the taker fee. 0 = orders arrive instantly.
     rebalance_band: float = 0.01     # skip orders that move a weight by less than this
     min_trade_usd: float = 1.0       # skip dust orders
     # Shorts are 1x (collateral = short notional). Roostoo hasn't published these, so they're assumptions:
@@ -67,6 +77,7 @@ def run_backtest(strategy: Strategy, data: Dict[str, pd.DataFrame], interval: st
       3. Short reductions are covered at the open (market, taker fee: Roostoo's close_short has no price).
       4. Everything else becomes a limit order at P (± offset), resting for this bar only:
          buys fill if the low trades through the limit, sells/short-opens if the high does.
+         With config.latency_bars > 0 the limit is priced off an older close (the order arrives late).
          Buys and short-opens can only use cash that was free before this bar's sells fill.
       5. Borrow fees, then intrabar liquidation check against the high (market, taker fee).
 
@@ -96,6 +107,9 @@ def run_backtest(strategy: Strategy, data: Dict[str, pd.DataFrame], interval: st
     C = np.nan_to_num(closes.ffill().to_numpy())  # last known price for valuation
     P_prev = np.vstack([np.full(n, np.nan), closes.to_numpy()[:-1]])  # limit reference: previous close
     W = held.to_numpy()
+    lat = max(0, int(config.latency_bars))
+    # stale limit reference: the close lat bars before the previous one (latency stress only)
+    P_stale = np.vstack([np.full((lat + 1, n), np.nan), closes.to_numpy()[:-(lat + 1)]]) if lat else None
 
     maker, taker = config.maker_fee, config.taker_fee
     off = config.limit_offset_bps / 1e4
@@ -141,6 +155,12 @@ def run_backtest(strategy: Strategy, data: Dict[str, pd.DataFrame], interval: st
     def through_high(high, limit):
         return high > limit if strict else high >= limit
 
+    locked = False
+    start_idx = 0 if trade_start is None else int(index.searchsorted(trade_start))
+
+    def started(i):
+        return i >= start_idx
+
     for t in range(len(index)):
         ts = index[t]
         px = O[t]
@@ -153,17 +173,25 @@ def run_backtest(strategy: Strategy, data: Dict[str, pd.DataFrame], interval: st
             if collat[i] + sqty[i] * (entry[i] - px[i]) <= mm * sqty[i] * px[i]:
                 close_short(i, sqty[i], px[i], ts, side="LIQUIDATE")
 
+        # 1b) Lock-in check on equity known at the end of the previous bar (no look-ahead)
+        if config.lockin_return > 0 and not locked and t > 0 and started(t - 1) \
+                and equity[t - 1] / config.initial_cash - 1 >= config.lockin_return:
+            locked = True
+
         # 2) Size orders against the previous close
         ref = np.where(np.isnan(P), last_px, P)
         eq = cash + (qty * ref).sum() + (collat + sqty * (entry - ref)).sum()
         cur_long = qty * ref
         cur_short = sqty * ref
         cur_w = (cur_long - cur_short) / eq if eq > 0 else np.zeros(n)
-        tgt_w = W[t]
+        tgt_w = W[t] * (config.lockin_scale if locked else 1.0)
         want_long = np.clip(tgt_w, 0, None) * eq
         want_short = np.clip(-tgt_w, 0, None) * eq
 
-        exit_side = ((want_long == 0) & (qty > 0)) | ((want_short == 0) & (sqty > 0))
+        # Exiting a side ignores the band, but not the dust floor: float residue (e.g. 1e-20 coins left
+        # after a sell) would otherwise be re-ordered every bar and inflate trade counts / fill rates.
+        dust = config.min_trade_usd
+        exit_side = ((want_long == 0) & (cur_long >= dust)) | ((want_short == 0) & (cur_short >= dust))
         need = tradable & ((np.abs(tgt_w - cur_w) > band) | exit_side)
 
         if need.any():
@@ -178,17 +206,29 @@ def run_backtest(strategy: Strategy, data: Dict[str, pd.DataFrame], interval: st
             add_short = np.where(need, np.clip(want_short - sqty * ref, 0, None), 0.0)
             add_long[add_long < config.min_trade_usd] = 0.0
             add_short[add_short < config.min_trade_usd] = 0.0
-            cost = (add_long.sum() + add_short.sum()) * (1 + maker)
+
+            lim_ref = ref if not lat else np.where(np.isnan(P_stale[t]), ref, P_stale[t])
+            sell_px = lim_ref * (1 + off)
+            buy_px = lim_ref * (1 - off)
+            # A resting limit that the open has already gapped past fills at the better open price
+            sell_fill = np.fmax(sell_px, px) if config.gap_improvement else sell_px
+            buy_fill = np.fmin(buy_px, px) if config.gap_improvement else buy_px
+            sell_fee = np.full(n, maker)
+            buy_fee = np.full(n, maker)
+            if lat:
+                # Late order: already marketable on arrival -> taker fee, filled at the (worse) limit price
+                sell_fill, buy_fill = sell_px, buy_px
+                sell_fee = np.where(px >= sell_px, taker, maker)
+                buy_fee = np.where(px <= buy_px, taker, maker)
+
+            cost = add_long.sum() * (1 + maker) + (add_long * (buy_fee - maker)).sum() \
+                + add_short.sum() * (1 + config.short_open_fee)
             if cost > 0 and cost > cash:
                 scale = max(cash, 0.0) / cost
                 add_long *= scale
                 add_short *= scale
-
-            sell_px = ref * (1 + off)
-            buy_px = ref * (1 - off)
-            # A resting limit that the open has already gapped past fills at the better open price
-            sell_fill = np.fmax(sell_px, px)
-            buy_fill = np.fmin(buy_px, px)
+                add_long[add_long < config.min_trade_usd] = 0.0    # scaling to ~0 cash must not leave dust
+                add_short[add_short < config.min_trade_usd] = 0.0
 
             for i in np.flatnonzero(need & (qty > 0) & (cur_long > want_long)):
                 q = qty[i] if want_long[i] == 0 else (cur_long[i] - want_long[i]) / ref[i]
@@ -197,7 +237,7 @@ def run_backtest(strategy: Strategy, data: Dict[str, pd.DataFrame], interval: st
                 q = min(q, qty[i])
                 if through_high(H[t][i], sell_px[i]):
                     value = q * sell_fill[i]
-                    f = value * maker
+                    f = value * sell_fee[i]
                     cash += value - f
                     qty[i] -= q
                     record(ts, i, "SELL", "LIMIT", True, q, sell_fill[i], f)
@@ -208,7 +248,7 @@ def run_backtest(strategy: Strategy, data: Dict[str, pd.DataFrame], interval: st
                 if through_high(H[t][i], sell_px[i]):
                     value = add_short[i]
                     q = value / sell_fill[i]
-                    f = value * maker
+                    f = value * config.short_open_fee
                     cash -= value + f
                     entry[i] = (entry[i] * sqty[i] + sell_fill[i] * q) / (sqty[i] + q)
                     sqty[i] += q
@@ -221,7 +261,7 @@ def run_backtest(strategy: Strategy, data: Dict[str, pd.DataFrame], interval: st
                 if through_low(L[t][i], buy_px[i]):
                     value = add_long[i]
                     q = value / buy_fill[i]
-                    f = value * maker
+                    f = value * buy_fee[i]
                     cash -= value + f
                     qty[i] += q
                     record(ts, i, "BUY", "LIMIT", True, q, buy_fill[i], f)

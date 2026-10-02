@@ -86,12 +86,14 @@ def main(argv=None) -> int:
     p.add_argument("--limit-fill", choices=["through", "touch"], default="through",
                    help="through: price must trade past the limit (default); touch: reaching it fills")
     p.add_argument("--band", type=float, default=0.01, help="Rebalance band in weight units")
+    p.add_argument("--short-open-fee", type=float, default=0.001,
+                   help="Fee on opening a short (Roostoo /v6/short_open: 0.1%% flat)")
     p.add_argument("--borrow-rate", type=float, default=0.0,
                    help="Annual borrow fee on short notional, e.g. 0.1 = 10%%/yr")
     p.add_argument("--maintenance", type=float, default=0.0,
                    help="Liquidate a short when its equity falls to this fraction of notional")
     p.add_argument("--windows", action="store_true", help="Evaluate on rolling competition-length windows")
-    p.add_argument("--window-days", type=int, default=7)
+    p.add_argument("--window-days", type=int, default=14, help="Competition length (Oct 4-17 = 14 days)")
     p.add_argument("--step-days", type=int, default=1)
     p.add_argument("--warmup-days", type=int, default=30)
     p.add_argument("--no-save", action="store_true", help="Don't write results to disk")
@@ -100,7 +102,8 @@ def main(argv=None) -> int:
     strategy = STRATEGIES[args.strategy](**parse_params(args.params))
     config = BacktestConfig(initial_cash=args.cash, maker_fee=args.maker_fee, taker_fee=args.taker_fee,
                             limit_offset_bps=args.limit_offset_bps, limit_fill=args.limit_fill,
-                            rebalance_band=args.band, borrow_rate_annual=args.borrow_rate,
+                            rebalance_band=args.band, short_open_fee=args.short_open_fee,
+                            borrow_rate_annual=args.borrow_rate,
                             maintenance_margin=args.maintenance)
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
 

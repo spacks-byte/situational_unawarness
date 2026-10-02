@@ -22,6 +22,7 @@ class ExecutionRunner:
         self.risk = RiskManager(self.config)
         self.audit_log = audit_log
         self.risk_state = risk_state
+        self._marks: dict[str, float] = {}      # snapshot prices the long notionals were valued at
 
     def execute(
         self,
@@ -61,6 +62,7 @@ class ExecutionRunner:
             result = {"status": "DUPLICATE", "signal_id": target.signal_id, "operations": []}
             self._audit("execution", result)
             return result
+        self._marks = {str(k).upper(): float(v) for k, v in (actual.get("prices") or {}).items()}
         long_targets = {item.symbol.upper(): item for item in target.longs}
         short_targets = {item.symbol.upper(): item for item in target.shorts}
         operations: list[dict[str, Any]] = []
@@ -74,7 +76,10 @@ class ExecutionRunner:
         child_index = 0
         for kind, amounts, target_by_symbol in actions:
             for symbol, amount in amounts.items():
-                for child_amount in self._split_amount(float(amount), total_equity_usd):
+                # A full short exit is one close_pct=100 call (see _dispatch), never sliced.
+                full_short_exit = kind == "close_short" and symbol not in target_by_symbol
+                children = [float(amount)] if full_short_exit else self._split_amount(float(amount), total_equity_usd)
+                for child_amount in children:
                     operation = self._execute_one(
                         target,
                         kind,
@@ -173,8 +178,13 @@ class ExecutionRunner:
         if self.config.dry_run:
             return {"Success": True, "DryRun": True}
 
-        price = self._price(symbol, target_config, price_field="MinAsk" if kind == "close_short" else "LastPrice")
         pair = f"{symbol}/USD"
+        if kind == "close_long" and self._marks.get(symbol, 0.0) > 0:
+            # The holding was valued at the snapshot price, so the same price gives back the exact
+            # coin quantity. A fresh ticker would oversell after a down-tick and the exchange rejects it.
+            quantity = amount_usd / self._marks[symbol]
+            return self.port.place_order(pair, "SELL", quantity, price=None, order_type="MARKET")
+        price = self._price(symbol, target_config, price_field="MinAsk" if kind == "close_short" else "LastPrice")
         if kind in {"open_long", "close_long"}:
             quantity = amount_usd / price
             side = "BUY" if kind == "open_long" else "SELL"
@@ -183,6 +193,10 @@ class ExecutionRunner:
         if kind == "open_short":
             limit_price = self._limit_price(target_config)
             return self.port.open_short(pair, amount_usd, price=limit_price)
+        if target_config is None:
+            # Full exit: close_qty = collateral / current price under-closes a losing short
+            # (collateral was posted at the lower entry price) and leaves a residual position.
+            return self.port.close_short(pair, close_pct=100)
         quantity = amount_usd / price
         return self.port.close_short(pair, close_qty=quantity)
 
