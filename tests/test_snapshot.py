@@ -1,4 +1,4 @@
-from src.engine.state.snapshot import normalize_exchange_snapshot
+from tradebot.engine.state.snapshot import normalize_exchange_snapshot
 
 
 def test_normalize_exchange_snapshot_to_engine_state():
@@ -29,3 +29,17 @@ def test_normalize_exchange_snapshot_to_engine_state():
     assert snapshot["equity_usd"] == 5625.0
     assert snapshot["prices"] == {"BTC": 50000.0}
     assert snapshot["entry_prices"] == {"ETH": 2500.0}
+
+
+def test_snapshot_reads_roostoo_spot_wallet_key():
+    """Real /v3/balance responses use "SpotWallet"; reading only "Wallet" made live equity $0."""
+    from tradebot.engine.state.snapshot import normalize_exchange_snapshot
+
+    snapshot = normalize_exchange_snapshot(
+        {"Success": True, "SpotWallet": {"USD": {"Free": 50000, "Lock": 0}, "BTC": {"Free": 0.5, "Lock": 0}}},
+        {"Positions": []},
+        {"Data": {"BTC/USD": {"LastPrice": 80000}}},
+    )
+
+    assert snapshot["cash_usd"] == 50000
+    assert snapshot["equity_usd"] == 90000

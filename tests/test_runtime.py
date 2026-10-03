@@ -1,12 +1,12 @@
 from datetime import UTC, datetime
 
-from src.engine.clock import SimClock
-from src.engine.config import ExecutionConfig
-from src.engine.execution.runner import ExecutionRunner
-from src.engine.ports.mock_port import MockExchangePort
-from src.engine.runtime import EngineRuntime
-from src.engine.schema.models import LongTarget, TargetPortfolio
-from src.engine.state.intent_store import IntentJournal
+from tradebot.core.clock import SimClock
+from tradebot.core.config import ExecutionConfig
+from tradebot.engine.execution.runner import ExecutionRunner
+from tradebot.exchange.mock import MockExchangePort
+from tradebot.engine.runtime import EngineRuntime
+from tradebot.engine.schema.models import LongTarget, TargetPortfolio
+from tradebot.engine.state.intent_store import IntentJournal
 
 
 def test_runtime_runs_strategy_through_shared_runner():
@@ -30,5 +30,5 @@ def test_runtime_runs_strategy_through_shared_runner():
 
     assert len(results) == 2
     assert all(result["status"] == "EXECUTED" for result in results)
-    assert calls == [10000.0, 10000.0]
+    assert calls == [10000.0, 9999.5]  # second snapshot reflects the 0.05% maker fee on the $1,000 buy
     assert clock.now().timestamp() == datetime(2026, 1, 1, 0, 0, 5).replace(tzinfo=UTC).timestamp()

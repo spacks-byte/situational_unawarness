@@ -1,11 +1,19 @@
+# Secrets
 .env
 
-# Downloaded market data
-data/
-
-# Backtest outputs
-results/
-
-# Python cache
+# Python
 __pycache__/
 *.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# Data and outputs (regenerate with `python -m tradebot data` / `backtest`)
+data/
+results/
+
+# Engine runtime state: intent journal, audit log, logs
+var/
+*.db
+*.jsonl
+*.log
