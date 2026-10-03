@@ -9,7 +9,7 @@ from tradebot.core.clock import SimClock
 from tradebot.core.config import ExecutionConfig
 from tradebot.engine import Engine
 from tradebot.engine.execution.runner import ExecutionRunner
-from tradebot.engine.schema import LongTarget, TargetPortfolio
+from tradebot.engine.schema import LongTarget, ShortTarget, TargetPortfolio
 from tradebot.engine.state.intent_store import IntentJournal
 from tradebot.exchange.mock import MockExchangePort
 from tradebot.live.bars import BarBuffer
@@ -182,3 +182,11 @@ def test_a_full_short_exit_closes_100_percent():
     port.tickers["ETH/USD"] = 2_500.0                                       # losing: collateral / price would under-close
     runner(port).execute(target("s"), {"cash_usd": 9_000.0, "shorts": {"ETH": 1_000.0}}, 9_750.0)
     assert port.short_positions == []
+
+
+def test_a_resting_short_open_without_collateral_is_not_sent_twice():
+    port = MockExchangePort(initial_wallet={"USD": 10_000.0})
+    resting = [{"Pair": "ETH/USD", "Side": "SHORT_OPEN", "Status": "PENDING", "Quantity": 0.5, "Price": 2_000.0}]
+    result = runner(port).execute(target("s", shorts=[ShortTarget(symbol="ETH", collateral_usd=1_000.0)]),
+                                  {"cash_usd": 9_000.0, "cash_free_usd": 9_000.0, "pending_orders": resting}, 10_000.0)
+    assert result["operations"] == []

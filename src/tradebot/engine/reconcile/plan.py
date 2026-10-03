@@ -98,8 +98,9 @@ def _pending_open_exposure(orders: list[dict[str, Any]] | None) -> tuple[dict[st
         if not symbol:
             continue
         side = str(order.get("Side", "")).upper()
-        if side == "SHORT_OPEN":
-            amount = float(order.get("Collateral", 0.0) or 0.0)
+        if side == "SHORT_OPEN":                      # query_order rows carry no Collateral (Roostoo docs)
+            amount = float(order.get("Collateral", 0.0) or 0.0) or \
+                float(order.get("Quantity", 0.0) or 0.0) * float(order.get("Price", 0.0) or 0.0)
             pending_shorts[symbol] = pending_shorts.get(symbol, 0.0) + amount
         elif side in ("BUY", "SELL"):               # a resting sell already reduces the long
             amount = float(order.get("Quantity", 0.0) or 0.0) * float(order.get("Price", 0.0) or 0.0)
