@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from src.engine.clock import SimClock
+from tradebot.core.clock import SimClock
 
 
 def test_sim_clock_advances_time():

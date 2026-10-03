@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tradebot"
+version = "0.1.0"
+description = "Autonomous trading bot for the Roostoo mock exchange: data pipeline, backtester and live execution engine"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.28",
+    "python-dotenv>=1.0",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "pyarrow>=14.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+tradebot = "tradebot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

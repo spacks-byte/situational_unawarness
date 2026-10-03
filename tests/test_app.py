@@ -1,10 +1,10 @@
 from datetime import UTC, datetime
 
-from src.engine.app import Engine
-from src.engine.clock import SimClock
-from src.engine.config import ExecutionConfig
-from src.engine.ports.mock_port import MockExchangePort
-from src.engine.schema.models import TargetPortfolio
+from tradebot.engine.app import Engine
+from tradebot.core.clock import SimClock
+from tradebot.core.config import ExecutionConfig
+from tradebot.exchange.mock import MockExchangePort
+from tradebot.engine.schema.models import TargetPortfolio
 
 
 def test_engine_facade_wires_runtime_state_and_audit(tmp_path):

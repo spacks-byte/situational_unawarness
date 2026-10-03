@@ -1,4 +1,4 @@
-from src.engine.state.intent_store import IntentJournal, IntentRecord
+from tradebot.engine.state.intent_store import IntentJournal, IntentRecord
 
 
 def test_intent_record_has_deterministic_id():

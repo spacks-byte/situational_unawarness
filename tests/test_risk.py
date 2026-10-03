@@ -1,6 +1,6 @@
-from src.engine.config import ExecutionConfig
-from src.engine.reconcile.plan import compute_rebalance_plan
-from src.engine.risk.manager import RiskManager
+from tradebot.core.config import ExecutionConfig
+from tradebot.engine.reconcile.plan import compute_rebalance_plan
+from tradebot.engine.risk.manager import RiskManager
 
 
 def test_risk_rejects_order_that_breaches_cash_reserve():

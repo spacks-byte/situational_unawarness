@@ -1,4 +1,4 @@
-from src.engine.ports.mock_port import MockExchangePort
+from tradebot.exchange.mock import MockExchangePort
 
 
 def test_mock_port_place_order_updates_wallet_and_order_state():

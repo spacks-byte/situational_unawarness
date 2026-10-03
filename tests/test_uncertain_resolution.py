@@ -1,7 +1,7 @@
-from src.engine.config import ExecutionConfig
-from src.engine.execution.runner import ExecutionRunner
-from src.engine.ports.mock_port import MockExchangePort
-from src.engine.state.intent_store import IntentJournal, IntentRecord
+from tradebot.core.config import ExecutionConfig
+from tradebot.engine.execution.runner import ExecutionRunner
+from tradebot.exchange.mock import MockExchangePort
+from tradebot.engine.state.intent_store import IntentJournal, IntentRecord
 
 
 def test_uncertain_intent_resolves_from_observed_exposure_delta():
