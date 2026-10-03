@@ -1,8 +1,8 @@
 from datetime import UTC, datetime, timedelta
 
-from src.engine.clock import SimClock
-from src.engine.reconcile.pending import cancel_stale_orders
-from src.engine.ports.mock_port import MockExchangePort
+from tradebot.core.clock import SimClock
+from tradebot.engine.reconcile.pending import cancel_stale_orders
+from tradebot.exchange.mock import MockExchangePort
 
 
 def test_cancel_stale_orders_uses_injected_clock():

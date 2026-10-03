@@ -1,0 +1,15 @@
+# Live settings for the RXM competition book; every key not set here keeps its default.
+#   python -m tradebot --config config/competition.yaml live [--live]
+# RXM holds ~0.98 of equity: about 3 longs (max ~0.55 each) and 3 shorts (~0.35 in total).
+# The default risk limits would reject that book, so these fit it with some headroom.
+execution:
+  strategy_poll_interval_seconds: 60   # 5 requests per cycle: ~5/min idle (limit ~30)
+  fill_timeout_seconds: 900            # unfilled limits are cancelled after one 15m bar, then re-quoted
+  max_child_order_pct: 0.5
+  max_gross_exposure: 1.0
+  max_per_symbol_exposure: 0.6
+  max_total_short_collateral_usd: 60000.0
+  max_order_value_usd: 100000.0
+  min_cash_reserve_usd: 200.0
+  max_daily_loss_usd: 1.0e9            # no daily-loss brake: brakes cost return in testing (docs/STRATEGY.md)
+  max_drawdown_pct: 1.0                # no drawdown brake, for the same reason

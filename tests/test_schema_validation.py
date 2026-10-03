@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.engine.schema.models import LongTarget, TargetPortfolio
+from tradebot.engine.schema.models import LongTarget, TargetPortfolio
 
 
 def make_target(**changes):

@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from src.engine.schema.models import LongTarget, ShortTarget, TargetPortfolio
+from tradebot.engine.schema.models import LongTarget, ShortTarget, TargetPortfolio
 
 
 def test_reconcile_closes_reductions_before_opens():
@@ -18,7 +18,7 @@ def test_reconcile_closes_reductions_before_opens():
         "cash_usd": 5000.0,
     }
 
-    from src.engine.reconcile.plan import compute_rebalance_plan
+    from tradebot.engine.reconcile.plan import compute_rebalance_plan
 
     plan = compute_rebalance_plan(target, actual, total_equity_usd=10000.0)
     assert plan["close_longs"]["BTC"] == 1000.0
@@ -37,7 +37,7 @@ def test_reconcile_uses_weight_when_notional_is_missing():
     )
     actual = {"longs": {}, "shorts": {}, "cash_usd": 10000.0}
 
-    from src.engine.reconcile.plan import compute_rebalance_plan
+    from tradebot.engine.reconcile.plan import compute_rebalance_plan
 
     plan = compute_rebalance_plan(target, actual, total_equity_usd=10000.0)
     assert plan["open_longs"]["BTC"] == 2500.0
@@ -61,7 +61,7 @@ def test_reconcile_does_not_duplicate_pending_open_orders():
         ],
     }
 
-    from src.engine.reconcile.plan import compute_rebalance_plan
+    from tradebot.engine.reconcile.plan import compute_rebalance_plan
 
     plan = compute_rebalance_plan(target, actual, total_equity_usd=10000.0)
     assert plan["open_longs"] == {}

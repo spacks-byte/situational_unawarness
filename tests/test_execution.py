@@ -1,9 +1,9 @@
 from datetime import UTC, datetime
 
-from src.engine.config import ExecutionConfig
-from src.engine.ports.mock_port import MockExchangePort
-from src.engine.schema.models import LongTarget, ShortTarget, TargetPortfolio, Urgency
-from src.engine.state.intent_store import IntentJournal
+from tradebot.core.config import ExecutionConfig
+from tradebot.exchange.mock import MockExchangePort
+from tradebot.engine.schema.models import LongTarget, ShortTarget, TargetPortfolio, Urgency
+from tradebot.engine.state.intent_store import IntentJournal
 
 
 def make_target(signal_id: str) -> TargetPortfolio:
@@ -18,7 +18,7 @@ def make_target(signal_id: str) -> TargetPortfolio:
 
 
 def test_runner_executes_reductions_before_additions():
-    from src.engine.execution.runner import ExecutionRunner
+    from tradebot.engine.execution.runner import ExecutionRunner
 
     port = MockExchangePort(
         initial_wallet={"USD": 10000.0, "BTC": 0.04},
@@ -61,7 +61,7 @@ def test_runner_executes_reductions_before_additions():
 
 
 def test_runner_deduplicates_signal_id():
-    from src.engine.execution.runner import ExecutionRunner
+    from tradebot.engine.execution.runner import ExecutionRunner
 
     port = MockExchangePort(initial_wallet={"USD": 10000.0})
     journal = IntentJournal(memory=True)
@@ -77,7 +77,7 @@ def test_runner_deduplicates_signal_id():
 
 
 def test_runner_slices_large_delta_into_bounded_child_orders():
-    from src.engine.execution.runner import ExecutionRunner
+    from tradebot.engine.execution.runner import ExecutionRunner
 
     port = MockExchangePort(initial_wallet={"USD": 10000.0})
     journal = IntentJournal(memory=True)
@@ -103,7 +103,7 @@ def test_runner_slices_large_delta_into_bounded_child_orders():
 
 
 def test_runner_ignores_small_opening_delta_inside_no_trade_band():
-    from src.engine.execution.runner import ExecutionRunner
+    from tradebot.engine.execution.runner import ExecutionRunner
 
     port = MockExchangePort(initial_wallet={"USD": 10000.0})
     runner = ExecutionRunner(
@@ -125,38 +125,55 @@ def test_runner_ignores_small_opening_delta_inside_no_trade_band():
     assert result["operations"] == []
 
 
-def test_high_urgency_routes_limit_target_as_market_order():
-    from src.engine.execution.runner import ExecutionRunner
-
-    port = MockExchangePort(initial_wallet={"USD": 10000.0})
-    runner = ExecutionRunner(
-        port,
-        IntentJournal(memory=True),
-        ExecutionConfig(dry_run=False, no_trade_band_pct=0.0),
-    )
-    target = TargetPortfolio(
+def _urgent_target(signal_id: str) -> TargetPortfolio:
+    return TargetPortfolio(
         strategy_id="strategy",
         strategy_version="v1",
-        signal_id="urgent-signal",
+        signal_id=signal_id,
         timestamp=datetime.now(UTC),
         longs=[LongTarget(symbol="BTC", notional_usd=1000.0, limit_price=49000.0, urgency=Urgency.HIGH)],
     )
 
-    result = runner.execute(target, {"longs": {}, "shorts": {}, "cash_usd": 10000.0}, 10000.0)
+
+def test_limit_only_policy_keeps_urgent_orders_as_limits():
+    from tradebot.engine.execution.runner import ExecutionRunner
+
+    port = MockExchangePort(initial_wallet={"USD": 10000.0})
+    runner = ExecutionRunner(port, IntentJournal(memory=True), ExecutionConfig(dry_run=False, no_trade_band_pct=0.0))
+
+    result = runner.execute(_urgent_target("urgent-limit"), {"longs": {}, "shorts": {}, "cash_usd": 10000.0}, 10000.0)
+
+    detail = result["operations"][0]["response"]["OrderDetail"]
+    assert result["status"] == "EXECUTED"
+    assert detail["Type"] == "LIMIT" and detail["Price"] == 49000.0
+
+
+def test_limit_or_market_policy_routes_high_urgency_as_market_order():
+    from tradebot.engine.execution.runner import ExecutionRunner
+
+    port = MockExchangePort(initial_wallet={"USD": 10000.0})
+    config = ExecutionConfig(dry_run=False, no_trade_band_pct=0.0, order_policy="limit_or_market")
+    runner = ExecutionRunner(port, IntentJournal(memory=True), config)
+
+    result = runner.execute(_urgent_target("urgent-market"), {"longs": {}, "shorts": {}, "cash_usd": 10000.0}, 10000.0)
 
     assert result["status"] == "EXECUTED"
     assert result["operations"][0]["response"]["OrderDetail"]["Type"] == "MARKET"
 
 
-def test_full_long_exit_sells_the_exact_holding_even_if_the_price_ticked_down():
-    from src.engine.execution.runner import ExecutionRunner
-    from src.engine.state.snapshot import read_exchange_snapshot
+def test_limit_only_closes_are_limit_at_snapshot_price_and_short_closes_market():
+    from tradebot.engine.execution.runner import ExecutionRunner
 
-    port = MockExchangePort(initial_wallet={"USD": 0.0, "ETH": 0.5}, tickers={"ETH/USD": 2000.0})
-    snap = read_exchange_snapshot(port)
-    port.tickers["ETH/USD"] = 1900.0                       # moves after the snapshot, before the sell
+    port = MockExchangePort(initial_wallet={"USD": 10000.0, "BTC": 0.04}, tickers={"BTC/USD": 50000.0, "ETH/USD": 2500.0})
+    port.open_short("ETH", 1000.0)
     runner = ExecutionRunner(port, IntentJournal(memory=True), ExecutionConfig(dry_run=False))
-    target = TargetPortfolio(strategy_id="t", strategy_version="v", signal_id="exit", timestamp=datetime.now(UTC))
-    result = runner.execute(target, snap, snap["equity_usd"])
-    assert {op["status"] for op in result["operations"]} == {"RESOLVED"}      # sliced into child orders
-    assert abs(port.wallet["ETH"]) < 1e-12
+    target = TargetPortfolio(strategy_id="s", strategy_version="v1", signal_id="flat", timestamp=datetime.now(UTC))
+    actual = {"longs": {"BTC": 2000.0}, "shorts": {"ETH": 1000.0}, "cash_usd": 10000.0,
+              "prices": {"BTC": 51000.0, "ETH": 2500.0}}
+
+    result = runner.execute(target, actual, 13000.0)
+
+    sell, cover = result["operations"]
+    assert sell["kind"] == "close_long" and sell["response"]["OrderDetail"]["Type"] == "LIMIT"
+    assert sell["response"]["OrderDetail"]["Price"] == 51000.0  # snapshot last price, no extra ticker call
+    assert cover["kind"] == "close_short" and "ClosedQty" in cover["response"]

@@ -1,5 +1,5 @@
-from src.engine.monitor.position_monitor import PositionMonitor
-from src.engine.schema.models import LongTarget, ShortTarget, TargetPortfolio
+from tradebot.engine.monitor.position_monitor import PositionMonitor
+from tradebot.engine.schema.models import LongTarget, ShortTarget, TargetPortfolio
 
 
 def test_monitor_emits_long_and_short_exit_alerts():

@@ -1,34 +1,80 @@
-quote_currency: USD
-supports_shorting: true
-supports_leverage: false
-supports_limit_orders: true
-supports_stop_orders: false
-live_mode: false
-dry_run: true
-spot_limit_fee: 0.0005
-spot_market_fee: 0.001
-short_open_fee: 0.001
-short_close_fee: 0.001
-no_trade_band_pct: 0.01
-min_trade_interval_seconds: 30
-max_child_order_pct: 0.25
-max_gross_exposure: 2.0
-max_net_exposure: 1.0
-max_per_symbol_exposure: 0.35
-max_positions: 20
-max_effective_leverage: 2.5
-min_cash_reserve_usd: 500.0
-max_total_short_collateral_usd: 10000.0
-max_daily_loss_usd: 2000.0
-max_drawdown_pct: 0.25
-stale_data_seconds: 60
-spread_guard_pct: 0.02
-price_deviation_pct: 0.05
-fat_finger_limit_pct: 0.2
-max_order_value_usd: 25000.0
-short_collateral_mode: auto
-strategy_poll_interval_seconds: 5
-equity_snapshot_interval_seconds: 300
-heart_beat_interval_seconds: 60
-fill_timeout_seconds: 30
-pending_short_ttl_seconds: 900
+# Single configuration file for the whole bot (backtest, live engine, data download).
+# Copy it and point $TRADEBOT_CONFIG (or --config) at the copy to override values.
+# API keys are NOT configured here: put them in .env (see .env.example).
+
+# Roostoo fee schedule (fractions of traded value), shared by backtest, engine risk checks and the mock exchange
+fees:
+  spot_maker: 0.0005    # limit orders
+  spot_taker: 0.001     # market orders
+  short_open: 0.001     # charged on collateral when a short is placed (limit or market)
+  short_close: 0.001    # short closes are always market
+
+exchange:
+  base_url: https://mock-api.roostoo.com   # overridden by BASE_URL in .env if set
+  request_timeout_seconds: 10.0
+  max_retries: 3                     # read requests only; orders are never retried automatically
+  retry_backoff_seconds: 1.0
+  min_request_interval_seconds: 0.1  # client-side throttle
+  exchange_info_ttl_seconds: 3600
+  server_time_resync_seconds: 600
+
+execution:
+  # Mode: live trading requires dry_run: false AND live_mode: true
+  live_mode: false
+  dry_run: true
+  supports_shorting: true
+  supports_limit_orders: true
+  order_policy: limit_only           # limit_only | limit_or_market
+  # Orders
+  no_trade_band_pct: 0.01
+  max_child_order_pct: 0.25
+  strategy_poll_interval_seconds: 5
+  fill_timeout_seconds: 900          # one 15m bar; unfilled limits are cancelled, then re-placed by the next signal
+  state_dir: var                     # intent journal + audit log
+  # Risk limits
+  max_gross_exposure: 2.0
+  max_net_exposure: 1.0
+  max_per_symbol_exposure: 0.35
+  max_positions: 20
+  min_cash_reserve_usd: 500.0
+  max_total_short_collateral_usd: 10000.0
+  max_daily_loss_usd: 2000.0
+  max_drawdown_pct: 0.25
+  max_order_value_usd: 25000.0
+  # Reserved: accepted but not implemented by the engine yet (see docs/REVIEW.md)
+  quote_currency: USD
+  supports_leverage: false
+  supports_stop_orders: false
+  min_trade_interval_seconds: 30
+  max_effective_leverage: 2.5
+  stale_data_seconds: 60
+  spread_guard_pct: 0.02
+  price_deviation_pct: 0.05
+  fat_finger_limit_pct: 0.2
+  short_collateral_mode: auto
+  equity_snapshot_interval_seconds: 300
+  heart_beat_interval_seconds: 60
+  pending_short_ttl_seconds: 900
+
+backtest:
+  initial_cash: 100000.0
+  limit_offset_bps: 0.0
+  limit_fill: through                # through | touch
+  lockin_return: 0.0                 # competition lock-in: once up this much, scale all weights by
+  lockin_scale: 0.3                  #   lockin_scale for the rest of the run (0 = off)
+  rebalance_band: 0.01
+  min_trade_usd: 1.0
+  borrow_rate_annual: 0.0            # assumption: Roostoo hasn't published short borrow costs
+  maintenance_margin: 0.0            # assumption
+  symbols: [BTC, ETH, SOL, BNB, XRP]
+  interval: 15m
+  window_days: 7
+  step_days: 1
+  warmup_days: 30
+  results_dir: results
+
+data:
+  dir: data/binance
+  intervals: [5m, 15m]
+  lookback_days: 365
+  workers: 8

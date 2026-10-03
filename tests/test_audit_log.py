@@ -1,7 +1,7 @@
 import json
 
-from src.engine.clock.base import SimClock
-from src.engine.state.audit_log import AuditLog
+from tradebot.core.clock import SimClock
+from tradebot.engine.state.audit_log import AuditLog
 
 
 def test_audit_log_writes_structured_events(tmp_path):

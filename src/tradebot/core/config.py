@@ -1,0 +1,160 @@
+"""
+Single configuration model for the whole project.
+
+One YAML file (config/default.yaml, or the path in $TRADEBOT_CONFIG) holds every section:
+  fees       - the exchange fee schedule, shared by backtest, engine risk checks and the mock exchange
+  exchange   - Roostoo connection settings
+  execution  - live engine behaviour and risk limits
+  backtest   - simulator settings
+  data       - historical data download settings
+Secrets never live in YAML: API keys come from the environment / .env (see exchange.client).
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any, Literal
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+DEFAULT_CONFIG_PATH = Path("config/default.yaml")
+CONFIG_ENV_VAR = "TRADEBOT_CONFIG"
+
+
+class _Section(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class FeeSchedule(_Section):
+    """Roostoo fees as fractions of traded value."""
+
+    spot_maker: float = 0.0005   # limit orders
+    spot_taker: float = 0.001    # market orders
+    short_open: float = 0.001    # charged on collateral when a short is placed, limit or market
+    short_close: float = 0.001   # short closes are always market (no price parameter)
+
+
+class ExchangeSettings(_Section):
+    base_url: str = "https://mock-api.roostoo.com"
+    request_timeout_seconds: float = 10.0
+    max_retries: int = 3                      # for idempotent requests only; orders are never auto-retried
+    retry_backoff_seconds: float = 1.0
+    min_request_interval_seconds: float = 0.1  # client-side throttle (no HFT / excessive requests)
+    exchange_info_ttl_seconds: int = 3600
+    server_time_resync_seconds: int = 600
+
+
+class ExecutionConfig(_Section):
+    """Live engine behaviour and risk limits."""
+
+    # Mode
+    live_mode: bool = False
+    dry_run: bool = True
+    supports_shorting: bool = True
+    supports_limit_orders: bool = True
+    order_policy: Literal["limit_only", "limit_or_market"] = "limit_only"
+
+    # Orders
+    no_trade_band_pct: float = 0.01
+    max_child_order_pct: float = 0.25
+    strategy_poll_interval_seconds: int = 5
+    fill_timeout_seconds: int = 900          # one 15m bar: unfilled limits are cancelled and re-placed next bar
+    state_dir: str = "var"                   # intent journal (sqlite) and audit log (jsonl)
+
+    # Risk limits
+    max_gross_exposure: float = 2.0
+    max_net_exposure: float = 1.0
+    max_per_symbol_exposure: float = 0.35
+    max_positions: int = 20
+    min_cash_reserve_usd: float = 500.0
+    max_total_short_collateral_usd: float = 10000.0
+    max_daily_loss_usd: float = 2000.0
+    max_drawdown_pct: float = 0.25
+    max_order_value_usd: float = 25000.0
+
+    # Reserved: accepted in config but not implemented by the engine yet (see docs/REVIEW.md)
+    quote_currency: str = "USD"
+    supports_leverage: bool = False
+    supports_stop_orders: bool = False
+    min_trade_interval_seconds: int = 30
+    max_effective_leverage: float = 2.5
+    stale_data_seconds: int = 60
+    spread_guard_pct: float = 0.02
+    price_deviation_pct: float = 0.05
+    fat_finger_limit_pct: float = 0.2
+    short_collateral_mode: str = "auto"
+    equity_snapshot_interval_seconds: int = 300
+    heart_beat_interval_seconds: int = 60
+    pending_short_ttl_seconds: int = 900
+
+    # Filled from the top-level `fees` section by Settings; not set in YAML
+    fees: FeeSchedule = Field(default_factory=FeeSchedule)
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "ExecutionConfig":
+        return Settings.load(path).execution
+
+    @classmethod
+    def default(cls) -> "ExecutionConfig":
+        return cls()
+
+
+class BacktestConfig(_Section):
+    initial_cash: float = 100_000.0       # competition starting portfolio
+    limit_offset_bps: float = 0.0         # buys rest this far below the last close, sells above
+    limit_fill: Literal["through", "touch"] = "through"
+    # Competition lock-in: once the return since the start reaches lockin_return, every target
+    # weight is scaled by lockin_scale for the rest of the run (0 = off)
+    lockin_return: float = 0.0
+    lockin_scale: float = 0.3
+    rebalance_band: float = 0.01          # skip orders that move a weight by less than this
+    min_trade_usd: float = 1.0
+    # Shorts are 1x (collateral = notional). Roostoo hasn't published these, so they're assumptions:
+    borrow_rate_annual: float = 0.0
+    maintenance_margin: float = 0.0
+    # CLI defaults
+    symbols: list[str] = Field(default_factory=lambda: ["BTC", "ETH", "SOL", "BNB", "XRP"])
+    interval: str = "15m"
+    window_days: int = 7
+    step_days: int = 1
+    warmup_days: int = 30
+    results_dir: str = "results"
+
+    # Filled from the top-level `fees` section by Settings; not set in YAML
+    fees: FeeSchedule = Field(default_factory=FeeSchedule)
+
+
+class DataConfig(_Section):
+    dir: str = "data/binance"
+    intervals: list[str] = Field(default_factory=lambda: ["5m", "15m"])
+    lookback_days: int = 365
+    workers: int = 8
+
+
+class Settings(_Section):
+    fees: FeeSchedule = Field(default_factory=FeeSchedule)
+    exchange: ExchangeSettings = Field(default_factory=ExchangeSettings)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    backtest: BacktestConfig = Field(default_factory=BacktestConfig)
+    data: DataConfig = Field(default_factory=DataConfig)
+
+    @model_validator(mode="after")
+    def _share_fees(self) -> "Settings":
+        # One fee schedule for every consumer
+        self.execution.fees = self.fees
+        self.backtest.fees = self.fees
+        return self
+
+    @classmethod
+    def load(cls, path: str | Path | None = None) -> "Settings":
+        """Load settings from `path`, $TRADEBOT_CONFIG, or config/default.yaml (defaults if none exist)."""
+        explicit = path or os.environ.get(CONFIG_ENV_VAR)
+        file_path = Path(explicit) if explicit else DEFAULT_CONFIG_PATH
+        if not file_path.exists():
+            if explicit:
+                raise FileNotFoundError(f"Config file does not exist: {file_path}")
+            return cls()
+        with file_path.open("r", encoding="utf-8") as handle:
+            payload: dict[str, Any] = yaml.safe_load(handle) or {}
+        return cls(**payload)

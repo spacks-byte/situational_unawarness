@@ -1,5 +1,5 @@
-from src.engine.config import ExecutionConfig
-from src.engine.risk.manager import RiskManager, RiskState
+from tradebot.core.config import ExecutionConfig
+from tradebot.engine.risk.manager import RiskManager, RiskState
 
 
 def test_risk_blocks_kill_switch_and_account_loss_limits():

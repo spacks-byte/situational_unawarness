@@ -2,22 +2,22 @@
 
 ## Scope and intent
 
-This project is intentionally split into two layers:
+The engine is intentionally split from network access (see `docs/ARCHITECTURE.md` for the whole system):
 
-1. The existing Roostoo client library under `crypto-roostoo-api/` remains the source of truth for network access and request signing.
-2. A new execution engine layer will translate a strategy target portfolio into minimal, safe, auditable exchange actions.
+1. `tradebot.exchange.client.RoostooClient` is the single source of truth for network access and request signing.
+2. The execution engine (`tradebot.engine`) translates a strategy target portfolio into minimal, safe, auditable exchange actions through the `ExchangePort` interface.
 
 The engine is not a signal generator. It consumes `TargetPortfolio` messages from a strategy module and reconciles them against actual wallet, short, and pending-order state before sending orders.
 
 ## High-level architecture
 
 - Strategy layer: emits typed target allocations and optional flatten instructions.
-- Intake layer: accepts strategy messages via in-process call and a file/queue watcher.
+- Intake layer: accepts strategy messages via in-process call. (A file/queue watcher is planned, not implemented.)
 - Engine core: validates inputs, diff against actual state, and computes the minimal action set.
 - Risk layer: applies position caps, circuit breakers, stale-data guards, and execution bans before orders go out.
 - Port layer: abstracts the exchange calls and keeps live/backtest behavior behind a common interface.
-- Persistence layer: SQLite stores intents, fills, pending shorts, equity snapshots, and audit data.
-- Analytics layer: read-only calculations for Sharpe, Sortino, Calmar, drawdown, and return.
+- Persistence layer: SQLite stores intents and signal receipts; a JSONL audit log stores decisions. (Fills, pending shorts and equity snapshots are planned, not implemented.)
+- Analytics layer: `tradebot.core.metrics`, shared with the backtester (Sharpe, Sortino, Calmar, drawdown, return).
 
 ## State machine
 
@@ -48,7 +48,7 @@ This keeps backtest and live mode logic identical while allowing the simulator t
 
 ## Verified Roostoo contract
 
-The local Roostoo API documentation establishes these behaviors:
+The Roostoo API documentation establishes these behaviors (the docs submodule was never committed, so this list is the team's record):
 
 - Pending spot and short orders are identified through `query_order(pending_only=True)`.
 - A pending short returns `Status: PENDING` and its `ID` is the order ID used by `cancel_order`.
@@ -58,6 +58,7 @@ The local Roostoo API documentation establishes these behaviors:
 - Short opens charge `0.1%` of collateral immediately, including pending limit opens.
 - Short closes fill immediately at the current best ask and charge `0.1%` of close value.
 - Free USD excludes locked short collateral; normalized equity adds collateral and unrealized P&L back.
+- `/v3/balance` returns the wallet under `SpotWallet` (verified against the mock exchange, Oct 2026).
 - Opening on an existing short pair merges quantity and collateral into the weighted-average position.
 
 ## Design principles
