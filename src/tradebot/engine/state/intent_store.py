@@ -137,6 +137,28 @@ class IntentJournal:
             updated_at=row["updated_at"],
         )
 
+    def list_by_status(self, status: str) -> list[IntentRecord]:
+        rows = self._conn.execute(
+            "SELECT * FROM intents WHERE status = ? ORDER BY created_at",
+            (status,),
+        ).fetchall()
+        return [
+            IntentRecord(
+                intent_id=row["intent_id"],
+                signal_id=row["signal_id"],
+                symbol=row["symbol"],
+                kind=row["kind"],
+                side=row["side"],
+                child_index=row["child_index"],
+                payload=json.loads(row["payload"]),
+                status=row["status"],
+                created_at=row["created_at"],
+                response_id=row["response_id"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
     def mark_sent(self, intent_id: str, response_id: str | None = None) -> None:
         self._conn.execute(
             "UPDATE intents SET status = 'SENT', response_id = ?, updated_at = ? WHERE intent_id = ?",

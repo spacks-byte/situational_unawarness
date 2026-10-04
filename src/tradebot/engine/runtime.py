@@ -24,6 +24,7 @@ class EngineRuntime:
     def run_once(self, strategy: Callable[[dict[str, Any]], TargetPortfolio]) -> dict[str, Any]:
         cancel_stale_orders(self.runner.port, self.clock, self.pending_timeout_seconds)
         snapshot = read_exchange_snapshot(self.runner.port)
+        self.runner.reconcile_uncertain_intents(snapshot)
         target = strategy(snapshot)
         alerts = self.monitor.evaluate(target, snapshot.get("prices", {}), snapshot.get("entry_prices", {})) if self.monitor else []
         if alerts:

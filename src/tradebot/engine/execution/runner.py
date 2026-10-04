@@ -114,6 +114,7 @@ class ExecutionRunner:
                         child_amount,
                         target_by_symbol.get(symbol),
                         child_index,
+                        actual,
                     )
                     operations.append(operation)
                     self._audit("operation", operation)
@@ -128,6 +129,18 @@ class ExecutionRunner:
         result = {"status": "EXECUTED", "signal_id": target.signal_id, "operations": operations}
         self._audit("execution", result)
         return result
+
+    def reconcile_uncertain_intents(self, snapshot: dict[str, Any]) -> list[str]:
+        """Resolve crash-window intents from the first fresh exchange snapshot."""
+        resolved: list[str] = []
+        for intent in self.journal.list_by_status("UNCERTAIN"):
+            before = intent.payload.get("before")
+            if not isinstance(before, dict):
+                continue
+            status = self.reconcile_uncertain_intent(intent.intent_id, before, snapshot)
+            if status == "RESOLVED":
+                resolved.append(intent.intent_id)
+        return resolved
 
     def execute_live(self, target: TargetPortfolio) -> dict[str, Any]:
         snapshot = read_exchange_snapshot(self.port)
@@ -171,9 +184,14 @@ class ExecutionRunner:
         amount_usd: float,
         target_config: LongTarget | ShortTarget | None,
         child_index: int,
+        actual: dict[str, Any],
     ) -> dict[str, Any]:
         side = {"open_long": "BUY", "close_long": "SELL", "open_short": "SHORT_OPEN", "close_short": "SHORT_CLOSE"}[kind]
-        payload = {"amount_usd": amount_usd}
+        exposure_key = "longs" if kind.endswith("long") else "shorts"
+        payload = {
+            "amount_usd": amount_usd,
+            "before": {exposure_key: {symbol: float((actual.get(exposure_key) or {}).get(symbol, 0.0))}},
+        }
         intent = IntentRecord.build(
             signal_id=target.signal_id,
             symbol=symbol,
