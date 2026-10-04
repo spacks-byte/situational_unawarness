@@ -203,3 +203,75 @@ def test_engine_priced_exits_rest_passively_by_the_configured_offset():
                                      "prices": {"ETH": 2000.0}}, 1000.0)
     detail = result["operations"][0]["response"]["OrderDetail"]
     assert detail["Type"] == "LIMIT" and detail["Price"] == 2000.0 * (1 + 5e-4)   # sells rest above the market
+
+
+# ---------------------------------------------------------------------------- limit-only order handling
+def _runner(port):
+    from tradebot.engine.execution.runner import ExecutionRunner
+
+    config = ExecutionConfig(dry_run=False, min_cash_reserve_usd=0, max_per_symbol_exposure=1.0, max_order_value_usd=1e6,
+                             max_total_short_collateral_usd=1e6, max_child_order_pct=1.0)
+    return ExecutionRunner(port, IntentJournal(memory=True), config)
+
+
+def _target(longs=(), shorts=()):
+    return TargetPortfolio(strategy_id="t", strategy_version="1", signal_id="s", timestamp=datetime.now(UTC),
+                           longs=list(longs), shorts=list(shorts))
+
+
+def test_a_rejected_order_does_not_stop_the_rest_of_the_plan():
+    port = MockExchangePort(initial_wallet={"USD": 10_000.0})
+    place = port.place_order
+    port.place_order = lambda pair, side, qty, price=None, order_type=None: (
+        {"Success": False, "ErrMsg": "insufficient balance"} if pair == "BTC/USD" else place(pair, side, qty, price, order_type))
+    result = _runner(port).execute(_target(longs=[LongTarget(symbol="BTC", notional_usd=1_000.0),
+                                                  LongTarget(symbol="ETH", notional_usd=1_000.0)]),
+                                   {"cash_usd": 10_000.0, "cash_free_usd": 10_000.0}, 10_000.0)
+    assert {o["symbol"]: o["status"] for o in result["operations"]} == {"BTC": "REJECTED", "ETH": "RESOLVED"}
+    assert result["status"] == "EXECUTED"
+
+
+def test_buys_are_capped_to_the_cash_that_is_free_now():
+    port = MockExchangePort(initial_wallet={"USD": 1_000.0, "BTC": 1.0})
+    snapshot = {"cash_usd": 1_000.0, "cash_free_usd": 1_000.0, "longs": {"BTC": 50_000.0}}
+    result = _runner(port).execute(_target(longs=[LongTarget(symbol="ETH", notional_usd=40_000.0)]), snapshot, 51_000.0)
+    buy = next(o for o in result["operations"] if o["kind"] == "open_long")
+    assert buy["amount_usd"] <= 1_000.0 and buy["status"] == "RESOLVED"
+
+
+def test_a_resting_sell_is_not_sent_twice():
+    port = MockExchangePort(initial_wallet={"USD": 0.0, "BTC": 1.0})
+    resting = [{"Pair": "BTC/USD", "Side": "SELL", "Status": "PENDING", "Quantity": 1.0, "Price": 50_000.0}]
+    snapshot = {"cash_usd": 0.0, "longs": {"BTC": 50_000.0}, "pending_orders": resting}
+    assert _runner(port).execute(_target(), snapshot, 50_000.0)["operations"] == []
+
+
+def test_a_resting_short_open_without_collateral_is_not_sent_twice():
+    port = MockExchangePort(initial_wallet={"USD": 10_000.0})
+    resting = [{"Pair": "ETH/USD", "Side": "SHORT_OPEN", "Status": "PENDING", "Quantity": 0.5, "Price": 2_000.0}]
+    snapshot = {"cash_usd": 9_000.0, "cash_free_usd": 9_000.0, "pending_orders": resting}
+    result = _runner(port).execute(_target(shorts=[ShortTarget(symbol="ETH", collateral_usd=1_000.0)]), snapshot, 10_000.0)
+    assert result["operations"] == []
+
+
+def test_an_order_the_client_refuses_is_rejected_and_the_plan_continues():
+    port = MockExchangePort(initial_wallet={"USD": 10_000.0})
+    place = port.place_order
+
+    def refuse_btc(pair, side, qty, price=None, order_type=None):
+        if pair == "BTC/USD":
+            raise ValueError("order notional is below the BTC/USD minimum")
+        return place(pair, side, qty, price, order_type)
+
+    port.place_order = refuse_btc
+    result = _runner(port).execute(_target(longs=[LongTarget(symbol="BTC", notional_usd=1_000.0),
+                                                  LongTarget(symbol="ETH", notional_usd=1_000.0)]),
+                                   {"cash_usd": 10_000.0, "cash_free_usd": 10_000.0}, 10_000.0)
+    assert [o["status"] for o in result["operations"]] == ["REJECTED", "RESOLVED"]
+
+
+def test_snapshot_free_cash_excludes_locked_usd():
+    from tradebot.engine.state.snapshot import normalize_exchange_snapshot
+
+    snapshot = normalize_exchange_snapshot({"SpotWallet": {"USD": {"Free": 700.0, "Lock": 300.0}}}, {"Positions": []}, {})
+    assert snapshot["cash_usd"] == 1_000.0 and snapshot["cash_free_usd"] == 700.0

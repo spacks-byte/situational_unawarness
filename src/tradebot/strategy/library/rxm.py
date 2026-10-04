@@ -17,12 +17,6 @@ Turnover control (`buffer`, 2 in the competition preset): a coin already in the 
 keeps its place while it still ranks in the top (bottom) k + buffer; only the slots that frees up go
 to the best-ranked outsiders. Fewer swaps, fewer fees.
 
-Two optional layers, off in every preset (tested, not adopted: docs/STRATEGY_SPEC.md §9):
-  * `max_share`: no coin may hold more than this fraction of its side (inverse-vol sizing otherwise
-    hands most of a side to the calmest coin); the excess is spread over the other names.
-  * `trend_days` + `tilt_down`: the net-long tilt follows the market. While BTC is above its price
-    `trend_days` ago the book runs `tilt`; otherwise it runs `tilt_down`.
-
 Presets (PRESETS below): "comp" = competition mode (k=3, tilt 0.3, gross 1.0, rank buffer 2, +6%
 lock-in in the engine config), "neutral" = the market-neutral book (k=5, gross 0.9, no tilt).
 
@@ -57,11 +51,9 @@ class ResidualMomentum(Strategy):
     name = "rxm"
 
     def __init__(self, k: int = 3, lookbacks: str = "72/168/336", gross: float = 1.0, tilt: float = 0.3,
-                 rebalance_h: int = 24, beta_days: int = 30, vol_days: int = 7, buffer: int = 0,
-                 max_share: float = 0.0, trend_days: int = 0, tilt_down: float = 0.0):
+                 rebalance_h: int = 24, beta_days: int = 30, vol_days: int = 7, buffer: int = 0):
         super().__init__(k=k, lookbacks=lookbacks, gross=gross, tilt=tilt, rebalance_h=rebalance_h,
-                         beta_days=beta_days, vol_days=vol_days, buffer=int(buffer), max_share=max_share,
-                         trend_days=int(trend_days), tilt_down=tilt_down)
+                         beta_days=beta_days, vol_days=vol_days, buffer=int(buffer))
         self.__dict__.update(self.params)
 
     @staticmethod
@@ -69,6 +61,11 @@ class ResidualMomentum(Strategy):
         return pd.DataFrame({s: df[col] for s, df in data.items()}).sort_index()
 
     def generate_weights(self, data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        return self.weights(*self.scores(data))
+
+    def scores(self, data: Dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Cross-sectional score per bar and coin (NaN = not eligible), and each coin's per-bar volatility.
+        Split from `weights` so research tools can score once and try many portfolio settings."""
         raw_close = self._panel(data, "close")
         close = raw_close.ffill()
         vol = self._panel(data, "volume")
@@ -104,8 +101,11 @@ class ResidualMomentum(Strategy):
             if len(horizons) > 1:
                 s_h = s_h.sub(s_h.mean(axis=1), axis=0).div(s_h.std(axis=1), axis=0)
             parts.append(s_h)
-        score = (sum(parts) / len(parts)).where(sigma.notna() & ~stale)
+        return (sum(parts) / len(parts)).where(sigma.notna() & ~stale), sigma
 
+    def weights(self, score: pd.DataFrame, sigma: pd.DataFrame) -> pd.DataFrame:
+        """Top-k long / bottom-k short with inverse-vol sizing, decided on rebalance bars and held between."""
+        idx = score.index
         rank = score.rank(axis=1, ascending=False)
         n = score.notna().sum(axis=1)
         k = np.minimum(self.k, n.values[:, None] // 2)          # long and short sets never overlap
@@ -116,16 +116,9 @@ class ResidualMomentum(Strategy):
         inv = 1.0 / sigma
         top = in_long.astype(float) * inv
         bot = in_short.astype(float) * inv
-        long_share = top.div(top.sum(axis=1), axis=0).fillna(0)
-        short_share = bot.div(bot.sum(axis=1), axis=0).fillna(0)
-        if self.max_share:
-            long_share, short_share = _cap_shares(long_share, self.max_share), _cap_shares(short_share, self.max_share)
-        tilt = self.tilt
-        if self.trend_days and btc is not None:
-            uptrend = lp[btc] > lp[btc].shift(self.trend_days * 24 * bph)
-            tilt = pd.Series(np.where(uptrend, self.tilt, self.tilt_down), index=idx)
         half = self.gross / 2
-        w = (long_share * half).mul(1 + tilt, axis=0) - (short_share * half).mul(1 - tilt, axis=0)
+        w = top.div(top.sum(axis=1), axis=0).fillna(0) * half * (1 + self.tilt) \
+            - bot.div(bot.sum(axis=1), axis=0).fillna(0) * half * (1 - self.tilt)
         w = w.where(rebal, np.nan).ffill().fillna(0.0)
 
         g = w.abs().sum(axis=1)
@@ -154,17 +147,6 @@ def _keep_then_fill(rank: np.ndarray, members: list, k: int, buffer: int, taken=
     order = [i for i in np.argsort(rank, kind="stable") if not np.isnan(rank[i]) and i not in taken]
     keep = [i for i in order if i in members and rank[i] <= k + buffer][:k]
     return keep + [i for i in order if i not in keep][:k - len(keep)]
-
-
-def _cap_shares(shares: pd.DataFrame, cap: float) -> pd.DataFrame:
-    """Side shares (rows sum to 1) with no name above `cap`; the excess goes pro rata to the others.
-    A cap below 1/k cannot be met in full: every name then sits at the cap and the rest stays in cash."""
-    for _ in range(4):
-        capped = shares.clip(upper=cap)
-        room = capped.where((capped > 0) & (capped < cap), 0.0)
-        excess = shares.sum(axis=1) - capped.sum(axis=1)
-        shares = capped + room.div(room.sum(axis=1), axis=0).fillna(0.0).mul(excess, axis=0)
-    return shares.clip(upper=cap)
 
 
 def preset(name: str) -> tuple[dict, dict]:

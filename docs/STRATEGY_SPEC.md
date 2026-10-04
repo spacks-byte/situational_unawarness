@@ -269,6 +269,6 @@ Written before the hold-out was run.
 **Also tested, not adopted** (discovery data, Oct 3):
 - Re-ranking every 1–12 hours, shorter horizons, a short-term reversal term: all lose to fees.
 - Adding the other Roostoo coins (17–29 names): flat or worse, deeper p10.
-- A per-coin share cap (`max_share`) and a BTC-trend-following tilt (`trend_days`, `tilt_down`):
-  no clear gain in both splits. Both remain in the code, switched off.
+- A per-coin share cap, and a tilt that follows the BTC trend (net short in a downtrend): no clear
+  gain in both splits. Removed from the code.
 - A lock-in that cuts to ×0.1: higher P(> 5.2%) but a lower composite; ×0.3 kept.

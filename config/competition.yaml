@@ -29,3 +29,5 @@ live:
     warn_symbol_weight: 0.50
     max_order_frac_equity: 0.51    # child orders are at most 0.5 of equity
     max_order_notional_usd: 60000.0
+    lockin_return: 0.0             # the strategy owns the lock-in (2 polls at +6%, saved to disk). A guard
+                                   # latching on one poll could block a book the bot never locked

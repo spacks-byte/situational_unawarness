@@ -48,15 +48,13 @@ python -m tradebot.research.experiments --preset comp --lockin 0.07,0.3 --tag " 
 python -m tradebot.research.experiments --preset comp --lockin 0 --tag " nolock"
 python -m tradebot.research.experiments --preset comp --conservative   # pessimistic fills: always run before adopting
 python -m tradebot.research.experiments --preset comp --latency 1      # stress: limit prices 15 min stale on arrival
-python -m tradebot.research.experiments --preset comp --params max_share=0.45 --tag " cap"
 ```
 Per-window results are saved to `results/windows/*.csv`.
 
 - `--latency` is a worst-case stress, not a forecast: live orders are re-priced just before they are
   sent (`tradebot/live/repeg.py`). Compare variants under it; do not read its level as the
   expected return.
-- Two more strategy options exist, switched off: `max_share` (per-coin cap inside a side) and
-  `trend_days` / `tilt_down` (the tilt follows the BTC trend). See spec §9.1.
+- Ideas already tested and rejected are listed in spec §9.1.
 
 ## 4. Grid search, the honest way
 ```bash
@@ -76,6 +74,38 @@ python -m tradebot.research.tune --grid "k=3,4;tilt=0.2,0.3,0.4;gross=1.0;lockin
 - `qualify` = P(14-day return > 5.2%). This is Screen 2: top 20 by return.
 - `score` = median composite. This is Screen 3.
 - `blend` = median + ½·p10.
+
+## 4b. Is the edge real? Four-step permutation validation
+```bash
+python -m tradebot.research.validation                         # ~2 min on 8 cores
+python -m tradebot.research.validation --perms 50 --wf-perms 20   # quick look
+```
+This follows Masters' permutation tests, as presented by neurotrader in "How I Develop Trading
+Strategies":
+
+1. **In-sample.** A 16-config grid (k 2–5, tilt 0 / 0.3, buffer 0 / 2) on 2024-02-15 → 2025-06-01,
+   with the plateau column.
+2. **In-sample permutation.** The bars are shuffled with one shuffle shared by every coin, which
+   destroys every time pattern and keeps the cross-section. The grid is re-optimised on each shuffle.
+   p is the share of shuffles whose best score matches the real best.
+3. **Walk-forward.** The config is re-picked every 30 days on the trailing 365 days, and only the next
+   30 days are scored.
+4. **Walk-forward permutation.** Everything after the first training window is shuffled, and step 3 is
+   re-run.
+
+Steps 2–4 score the signal on daily closes, with 10 bp per unit of turnover. The lock-in and the fills
+are what `experiments` covers.
+
+Result on Oct 3, 2026 (200 / 100 shuffles):
+
+| Step | Result |
+|---|---|
+| In-sample | best Sharpe 2.21; comp config 2.18 |
+| In-sample permutation | p = 0.005 (none of 200 shuffles reached it) |
+| Walk-forward | Sharpe 1.51 out of sample |
+| Walk-forward permutation | p = 0.02 |
+
+The edge is very unlikely to be fitted noise. The test says nothing about how big the edge is.
 
 ## 5. Adopting a change (change control, spec §9)
 1. Write the hypothesis in `docs/STRATEGY_SPEC.md` §9 **before** running the grid.

@@ -18,6 +18,7 @@ def normalize_exchange_snapshot(
     wallet = (balance or {}).get("SpotWallet") or (balance or {}).get("Wallet") or {}
     ticker_data = (tickers or {}).get("Data", tickers or {})
     cash_usd = 0.0
+    cash_free_usd = 0.0
     longs: dict[str, float] = {}
     long_value = 0.0
     prices = {
@@ -33,6 +34,7 @@ def normalize_exchange_snapshot(
         quantity = _number(raw_entry.get("Free")) + _number(raw_entry.get("Lock", raw_entry.get("Locked")))
         if symbol == "USD":
             cash_usd = quantity
+            cash_free_usd = _number(raw_entry.get("Free"))
             continue
         price = _ticker_price(ticker_data, symbol)
         if quantity <= 0 or price <= 0:
@@ -69,6 +71,7 @@ def normalize_exchange_snapshot(
     raw_pending = pending_orders.get("OrderMatched", []) if isinstance(pending_orders, dict) else (pending_orders or [])
     return {
         "cash_usd": cash_usd,
+        "cash_free_usd": cash_free_usd,
         "longs": longs,
         "shorts": shorts,
         "equity_usd": cash_usd + long_value + short_collateral + short_pnl,
