@@ -2,19 +2,26 @@
 Command-line entry point: `python -m tradebot <command>` (or `tradebot <command>` once installed).
 
 Commands:
-  data      download historical klines from Binance Vision
-  backtest  backtest a strategy (full period or rolling competition windows)
-  api       interactive Roostoo API test menu
+  data       download historical klines from Binance Vision
+  backtest   backtest a strategy (full period or rolling competition windows)
+  live       run the bot unattended on Roostoo (dry run unless --live)
+  replay     simulate the live bot on downloaded candles (no network)
+  dashboard  build the trading-desk dashboard (HTML)
+  api        interactive Roostoo API test menu
 """
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 
 from tradebot.backtest import cli as backtest_cli
 from tradebot.core.config import Settings
-from tradebot.core.log import setup_logging
+from tradebot.core.log import LOG_FORMAT, setup_logging
 
 
 def _data_command(args, settings: Settings) -> int:
@@ -47,6 +54,46 @@ def _data_command(args, settings: Settings) -> int:
     return 0
 
 
+def _live_overrides(args, settings: Settings) -> Settings:
+    live = {k: v for k, v in (("mode", args.mode), ("state_dir", args.state_dir)) if v}
+    return settings.model_copy(update={"live": settings.live.model_copy(update=live)}) if live else settings
+
+
+def _live_command(args, settings: Settings) -> int:
+    from tradebot.live.runner import LiveRunner
+
+    if args.live and os.environ.get("ROOSTOO_CONFIRM_LIVE") != "YES":
+        print("--live sends real orders: set ROOSTOO_CONFIRM_LIVE=YES in the environment to confirm", file=sys.stderr)
+        return 2
+    settings = _live_overrides(args, settings)
+    log_file = Path(settings.live.state_dir) / "bot.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(log_file, maxBytes=20_000_000, backupCount=10, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    logging.getLogger().addHandler(handler)
+    try:
+        runner = LiveRunner(settings, mode="live" if args.live else "dry-run")
+    except (RuntimeError, ValueError) as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        return 2
+    return runner.run(max_iterations=args.max_loops)
+
+
+def _replay_command(args, settings: Settings) -> int:
+    from tradebot.live.replay import run_replay
+
+    if args.mode:
+        settings = _live_overrides(args, settings)
+    run_replay(settings, args.start, args.days, args.cash, args.out, keep_state=args.keep_state)
+    return 0
+
+
+def _dashboard_command(args, settings: Settings) -> int:
+    from tradebot.dashboard.build import main as dashboard_main
+
+    return dashboard_main(args.dashboard_args)
+
+
 def _api_command(args, settings: Settings) -> int:
     from tradebot.exchange.manual import run_menu
 
@@ -71,6 +118,29 @@ def build_parser() -> argparse.ArgumentParser:
     data.set_defaults(handler=_data_command)
 
     backtest_cli.add_parser(sub)
+
+    live = sub.add_parser("live", help="Run the bot unattended on Roostoo (dry run unless --live)")
+    live.add_argument("--live", action="store_true",
+                      help="send real orders (also needs ROOSTOO_CONFIRM_LIVE=YES); default is a dry run")
+    live.add_argument("--mode", help="strategy preset, e.g. comp | neutral (default: config live.mode)")
+    live.add_argument("--state-dir", help="journal, logs and status (default: config live.state_dir)")
+    live.add_argument("--max-loops", type=int, help="stop after N loops (testing)")
+    live.set_defaults(handler=_live_command)
+
+    replay = sub.add_parser("replay", help="Simulate the live bot on downloaded candles (no network)")
+    replay.add_argument("--start", default="2026-09-01T00:16", help="UTC start time")
+    replay.add_argument("--days", type=float, default=7.0)
+    replay.add_argument("--cash", type=float, default=100_000.0)
+    replay.add_argument("--mode", help="strategy preset (default: config live.mode)")
+    replay.add_argument("--state-dir", help=argparse.SUPPRESS)
+    replay.add_argument("--out", default="results/replay")
+    replay.add_argument("--keep-state", action="store_true", help="keep previous state (restart test)")
+    replay.set_defaults(handler=_replay_command)
+
+    dash = sub.add_parser("dashboard", help="Build the trading-desk dashboard (see docs/DASHBOARD.md)",
+                          add_help=False)
+    dash.add_argument("dashboard_args", nargs=argparse.REMAINDER)
+    dash.set_defaults(handler=_dashboard_command)
 
     api = sub.add_parser("api", help="Interactive Roostoo API test menu")
     api.set_defaults(handler=_api_command)

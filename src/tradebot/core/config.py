@@ -7,6 +7,7 @@ One YAML file (config/default.yaml, or the path in $TRADEBOT_CONFIG) holds every
   execution  - live engine behaviour and risk limits
   backtest   - simulator settings
   data       - historical data download settings
+  live       - unattended live runner and live candle bridge (`python -m tradebot live`)
 Secrets never live in YAML: API keys come from the environment / .env (see exchange.client).
 """
 from __future__ import annotations
@@ -54,6 +55,7 @@ class ExecutionConfig(_Section):
     supports_shorting: bool = True
     supports_limit_orders: bool = True
     order_policy: Literal["limit_only", "limit_or_market"] = "limit_only"
+    limit_offset_bps: float = 0.0            # passive offset for limits the engine prices itself (e.g. exits)
 
     # Orders
     no_trade_band_pct: float = 0.01
@@ -106,6 +108,12 @@ class BacktestConfig(_Section):
     limit_fill: Literal["through", "touch"] = "through"
     rebalance_band: float = 0.01          # skip orders that move a weight by less than this
     min_trade_usd: float = 1.0
+    gap_improvement: bool = True          # a limit the open gapped past fills at the better open (False: at the limit)
+    latency_bars: int = 0                 # stress test: limits priced this many bars stale; crossed on arrival = taker
+    # Competition lock-in overlay: once the return since trade start reaches lockin_return,
+    # all target weights are scaled by lockin_scale for the rest of the run (0 = off)
+    lockin_return: float = 0.0
+    lockin_scale: float = 0.3
     # Shorts are 1x (collateral = notional). Roostoo hasn't published these, so they're assumptions:
     borrow_rate_annual: float = 0.0
     maintenance_margin: float = 0.0
@@ -128,12 +136,43 @@ class DataConfig(_Section):
     workers: int = 8
 
 
+class LiveConfig(_Section):
+    """The unattended runner (`python -m tradebot live`) and the live candle bridge."""
+
+    strategy: str = "rxm"                 # registry name; rxm runs through its frozen presets
+    mode: str = "comp"                    # rxm preset (comp | neutral); never change it mid-event
+    params: dict[str, Any] = Field(default_factory=dict)   # strategy params for non-preset strategies
+    universe: list[str] = Field(default_factory=list)       # coins; empty = the strategy's own universe
+    state_dir: str = "var/live"           # engine journal, audit log, strategy state, status, bot.log
+    # Candles
+    klines_url: str = "https://data-api.binance.vision"
+    buffer_days: int = 50                 # >= 45: 30-day beta + 14-day lookback
+    bar_grace_minutes: int = 30           # wait this long for a late decision bar before going without it
+    stale_after_hours: float = 2.0        # no new candle for this long: hold the book
+    # Target construction
+    band: float = 0.01                    # only trade symbols more than this off target (as the backtest)
+    gross_cap: float = 0.98               # leave cash for fees so a gross-1.0 book passes the cash check
+    min_trade_usd: float = 20.0
+    lock_confirmations: int = 2           # consecutive polls above the lock-in return before locking
+    max_equity_jump: float = 0.5          # reject a snapshot whose equity moved more than this (partial read)
+    # Order transport
+    max_http_per_minute: int = 25         # Roostoo allows 30
+    repeg: bool = True                    # re-price each limit off a fresh ticker just before sending
+    repeg_max_move: float = 0.03          # skip the order if the price moved more than this since the signal
+    # Supervision
+    kill_file: str = "KILL"               # create this file to stop all new orders; delete it to resume
+    heartbeat_minutes: int = 15
+    max_backoff_seconds: int = 900        # cap on the retry delay after consecutive failed loops
+    guard: dict[str, Any] = Field(default_factory=dict)     # tradebot.live.guard.GuardConfig overrides
+
+
 class Settings(_Section):
     fees: FeeSchedule = Field(default_factory=FeeSchedule)
     exchange: ExchangeSettings = Field(default_factory=ExchangeSettings)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     data: DataConfig = Field(default_factory=DataConfig)
+    live: LiveConfig = Field(default_factory=LiveConfig)
 
     @model_validator(mode="after")
     def _share_fees(self) -> "Settings":

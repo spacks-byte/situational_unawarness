@@ -25,6 +25,7 @@ execution:
   supports_shorting: true
   supports_limit_orders: true
   order_policy: limit_only           # limit_only | limit_or_market
+  limit_offset_bps: 0.0              # passive offset for limits the engine prices itself (exits)
   # Orders
   no_trade_band_pct: 0.01
   max_child_order_pct: 0.25
@@ -62,6 +63,10 @@ backtest:
   limit_fill: through                # through | touch
   rebalance_band: 0.01
   min_trade_usd: 1.0
+  gap_improvement: true              # a limit the open gapped past fills at the better open price
+  latency_bars: 0                    # stress test: stale limit prices
+  lockin_return: 0.0                 # competition lock-in overlay (0 = off)
+  lockin_scale: 0.3
   borrow_rate_annual: 0.0            # assumption: Roostoo hasn't published short borrow costs
   maintenance_margin: 0.0            # assumption
   symbols: [BTC, ETH, SOL, BNB, XRP]
@@ -76,3 +81,26 @@ data:
   intervals: [5m, 15m]
   lookback_days: 365
   workers: 8
+
+live:
+  strategy: rxm
+  mode: comp                         # rxm preset: comp | neutral. Never change it mid-event.
+  params: {}
+  universe: []                       # empty = the strategy's own universe
+  state_dir: var/live
+  klines_url: https://data-api.binance.vision
+  buffer_days: 50
+  bar_grace_minutes: 30
+  stale_after_hours: 2.0
+  band: 0.01
+  gross_cap: 0.98
+  min_trade_usd: 20.0
+  lock_confirmations: 2
+  max_equity_jump: 0.5
+  max_http_per_minute: 25
+  repeg: true
+  repeg_max_move: 0.03
+  kill_file: KILL
+  heartbeat_minutes: 15
+  max_backoff_seconds: 900
+  guard: {}
