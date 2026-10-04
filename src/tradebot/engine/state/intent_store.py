@@ -151,6 +151,13 @@ class IntentJournal:
         )
         self._conn.commit()
 
+    def mark_rejected(self, intent_id: str) -> None:
+        self._conn.execute(
+            "UPDATE intents SET status = 'REJECTED', updated_at = ? WHERE intent_id = ?",
+            (self.clock.now().astimezone(timezone.utc).isoformat(), intent_id),
+        )
+        self._conn.commit()
+
     def mark_uncertain(self, intent_id: str) -> None:
         self._conn.execute(
             "UPDATE intents SET status = 'UNCERTAIN', updated_at = ? WHERE intent_id = ?",

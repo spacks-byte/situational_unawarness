@@ -25,6 +25,11 @@ class ExecutionRunner:
         the same one-bar lifetime). Short closes are always market: Roostoo's API takes no price,
         and a full short exit is one close_pct=100 call, so a losing short leaves no residual.
       - "limit_or_market": LIMIT only when the target sets limit_price and urgency isn't high.
+
+    A rejected order (Success:false, or refused by the client before sending) is REJECTED and the
+    rest of the plan still runs; only an unknown outcome (a transport error) is UNCERTAIN and stops
+    it. Buys and short opens are capped to the USD that is free now, so they never depend on sells
+    that haven't filled yet; the next signal sends the rest.
     """
 
     def __init__(self, port: ExchangePort, journal: IntentJournal, config: ExecutionConfig | None = None, audit_log: AuditLog | None = None, risk_state: RiskState | None = None) -> None:
@@ -91,8 +96,12 @@ class ExecutionRunner:
             ("open_long", plan["open_longs"], long_targets),
             ("open_short", plan["open_shorts"], short_targets),
         )
+        # Live snapshots carry cash_free_usd; hand-built ones may only have cash_usd (Free + Lock)
+        budget = float(actual.get("cash_free_usd", actual.get("cash_usd", 0.0))) - self.config.min_cash_reserve_usd
         child_index = 0
         for kind, amounts, target_by_symbol in actions:
+            if kind.startswith("open_"):
+                amounts = self._fund(amounts, budget, kind)
             for symbol, amount in amounts.items():
                 # A full short exit is one close_pct=100 call (see _dispatch), never sliced
                 full_short_exit = kind == "close_short" and symbol not in target_by_symbol
@@ -109,6 +118,8 @@ class ExecutionRunner:
                     operations.append(operation)
                     self._audit("operation", operation)
                     child_index += 1
+                    if kind.startswith("open_") and operation["status"] in ("SENT", "RESOLVED"):
+                        budget -= child_amount * (1 + self._open_fee(kind))
                     if operation["status"] == "UNCERTAIN":
                         result = {"status": "UNCERTAIN", "signal_id": target.signal_id, "operations": operations}
                         self._audit("execution", result)
@@ -176,13 +187,16 @@ class ExecutionRunner:
 
         try:
             response = self._dispatch(kind, symbol, amount_usd, target_config)
+        except ValueError as e:                     # refused by the client: nothing was sent
+            self.journal.mark_rejected(intent.intent_id)
+            return {"intent_id": intent.intent_id, "kind": kind, "symbol": symbol, "amount_usd": amount_usd, "status": "REJECTED", "reason": str(e)}
         except Exception:
             self.journal.mark_uncertain(intent.intent_id)
             return {"intent_id": intent.intent_id, "kind": kind, "symbol": symbol, "amount_usd": amount_usd, "status": "UNCERTAIN"}
 
         if not response or response.get("Success") is False:
-            self.journal.mark_uncertain(intent.intent_id)
-            return {"intent_id": intent.intent_id, "kind": kind, "symbol": symbol, "amount_usd": amount_usd, "status": "UNCERTAIN", "response": response}
+            self.journal.mark_rejected(intent.intent_id)
+            return {"intent_id": intent.intent_id, "kind": kind, "symbol": symbol, "amount_usd": amount_usd, "status": "REJECTED", "response": response}
 
         self.journal.mark_sent(intent.intent_id, self._response_id(response))
         if self._is_resolved(response):
@@ -213,6 +227,17 @@ class ExecutionRunner:
         side = "BUY" if kind == "open_long" else "SELL"
         return self.port.place_order(pair, side, quantity, price=limit_price,
                                      order_type="LIMIT" if limit_price else "MARKET")
+
+    def _fund(self, amounts: dict[str, float], budget: float, kind: str) -> dict[str, float]:
+        """Scale opening amounts down to what the free cash pays for, fees included."""
+        cost = sum(amounts.values()) * (1 + self._open_fee(kind))
+        if cost <= max(budget, 0.0):
+            return amounts
+        scale = max(budget, 0.0) / cost
+        return {symbol: amount * scale for symbol, amount in amounts.items() if amount * scale >= 1.0}
+
+    def _open_fee(self, kind: str) -> float:
+        return self.config.fees.short_open if kind == "open_short" else self.config.fees.spot_maker
 
     def _split_amount(self, amount_usd: float, total_equity_usd: float) -> list[float]:
         max_child = total_equity_usd * self.config.max_child_order_pct

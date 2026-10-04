@@ -64,8 +64,8 @@ class GuardedPort:
         normal rebalance halfway (e.g. after the buys and before the shorts, net looks too long);
       * each order at send time (here): kill switch, fat-finger price, order size, self-cross,
         order/API rate. These depend only on the order, with the price it is actually sent at.
-    A blocked order is not sent; the engine sees Success: False, marks it UNCERTAIN and stops the
-    plan. Cancels are never blocked; short closes only by the kill switch (they reduce risk).
+    A blocked order is not sent; the engine sees Success: False and marks it REJECTED. The rest of
+    the plan still runs, and each later order is checked on its own. Cancels are never blocked; short closes only by the kill switch (they reduce risk).
     """
 
     def __init__(self, port: Any, guard: Guard, snapshot: Callable[[], dict[str, Any] | None],
