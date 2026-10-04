@@ -177,3 +177,29 @@ def test_limit_only_closes_are_limit_at_snapshot_price_and_short_closes_market()
     assert sell["kind"] == "close_long" and sell["response"]["OrderDetail"]["Type"] == "LIMIT"
     assert sell["response"]["OrderDetail"]["Price"] == 51000.0  # snapshot last price, no extra ticker call
     assert cover["kind"] == "close_short" and "ClosedQty" in cover["response"]
+
+
+def test_full_long_exit_sells_the_exact_holding_even_if_the_price_ticked_down():
+    from tradebot.engine.execution.runner import ExecutionRunner
+    from tradebot.engine.state.snapshot import read_exchange_snapshot
+
+    port = MockExchangePort(initial_wallet={"USD": 0.0, "ETH": 0.5}, tickers={"ETH/USD": 2000.0})
+    snap = read_exchange_snapshot(port)
+    port.tickers["ETH/USD"] = 1900.0                       # moves after the snapshot, before the sell
+    runner = ExecutionRunner(port, IntentJournal(memory=True), ExecutionConfig(dry_run=False))
+    target = TargetPortfolio(strategy_id="t", strategy_version="v", signal_id="exit", timestamp=datetime.now(UTC))
+    result = runner.execute(target, snap, snap["equity_usd"])
+    assert {op["status"] for op in result["operations"]} == {"RESOLVED"}
+    assert abs(port.wallet["ETH"]) < 1e-12                 # quantity sized at the snapshot price
+
+
+def test_engine_priced_exits_rest_passively_by_the_configured_offset():
+    from tradebot.engine.execution.runner import ExecutionRunner
+
+    port = MockExchangePort(initial_wallet={"USD": 0.0, "ETH": 0.5}, tickers={"ETH/USD": 2000.0})
+    runner = ExecutionRunner(port, IntentJournal(memory=True), ExecutionConfig(dry_run=False, limit_offset_bps=5))
+    target = TargetPortfolio(strategy_id="t", strategy_version="v", signal_id="exit5", timestamp=datetime.now(UTC))
+    result = runner.execute(target, {"longs": {"ETH": 1000.0}, "shorts": {}, "cash_usd": 0.0,
+                                     "prices": {"ETH": 2000.0}}, 1000.0)
+    detail = result["operations"][0]["response"]["OrderDetail"]
+    assert detail["Type"] == "LIMIT" and detail["Price"] == 2000.0 * (1 + 5e-4)   # sells rest above the market

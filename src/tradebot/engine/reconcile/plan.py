@@ -105,3 +105,7 @@ def _pending_open_exposure(orders: list[dict[str, Any]] | None) -> tuple[dict[st
             amount = float(order.get("Quantity", 0.0) or 0.0) * float(order.get("Price", 0.0) or 0.0)
             pending_longs[symbol] = pending_longs.get(symbol, 0.0) + amount
     return pending_longs, pending_shorts
+
+
+# Public name: the live bridge counts resting orders the same way the plan does
+pending_open_exposure = _pending_open_exposure

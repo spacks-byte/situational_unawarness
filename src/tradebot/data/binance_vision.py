@@ -56,6 +56,7 @@ def _make_session() -> requests.Session:
 
 
 _session = _make_session()
+_hosts = [BASE_URL, S3_LIST_URL]   # reordered at runtime so a blocked host is only tried once
 
 
 def symbol_exists(symbol: str) -> bool:
@@ -103,9 +104,20 @@ def download(remote_path: str, raw_dir: Path) -> Optional[Path]:
     if local.exists():
         return local
 
-    url = f"{BASE_URL}/{remote_path}"
     for attempt in range(2):
-        resp = _session.get(url, timeout=120)
+        resp, url = None, None
+        # Some networks block the data.binance.vision CDN; the S3 bucket behind it serves the same files.
+        for host in list(_hosts):
+            try:
+                resp = _session.get(f"{host}/{remote_path}", timeout=120)
+                url = f"{host}/{remote_path}"
+                break
+            except requests.RequestException:
+                if len(_hosts) > 1 and _hosts[0] == host:
+                    _hosts.append(_hosts.pop(0))     # demote the failing host for all later files
+                continue
+        if resp is None:
+            raise requests.ConnectionError(f"could not reach Binance Vision for {remote_path}")
         if resp.status_code == 404:
             return None
         resp.raise_for_status()

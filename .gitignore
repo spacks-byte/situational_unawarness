@@ -17,3 +17,6 @@ var/
 *.db
 *.jsonl
 *.log
+
+# Live bot kill switch (create to pause trading)
+KILL

@@ -52,15 +52,17 @@ A review of the whole repository against the hackathon rules (autonomous bot on 
   - Wider `.gitignore`.
   - One root `.env.example` with placeholders.
 
-## 3. Missing features (not built, in priority order)
+## 3. Missing features (in priority order)
+
+**Update Oct 3:** the quant's RXM strategy was ported into the package, and items 1, 2 and 7 below are now built (see section 6).
 
 ### P0: needed to compete
-1. **Live runner / entry point.**
-   - There is no command that runs the engine unattended. `EngineRuntime.run()` has no exception handling, so a single failed request (now a `RoostooError`) stops the bot.
-   - **Needed:** a `tradebot live` command with crash recovery, restart safety (rebuild state from the exchange and journal), graceful shutdown and a heartbeat log.
-2. **Strategy adapter and live candle feed.**
-   - Backtested strategies (`Strategy.generate_weights`) can't run live yet.
-   - **Needed:** a recent-candle buffer from Binance klines (REST), with Roostoo ticker polling as a fallback. Then a call on each completed bar that converts the last weight row into a `TargetPortfolio` (see `ARCHITECTURE.md`), with one `signal_id` per bar.
+1. ~~**Live runner / entry point.**~~ **Done:** `python -m tradebot live`, which runs `tradebot.live.runner.LiveRunner`.
+   - Failed loops back off exponentially instead of stopping the bot.
+   - Restarts are safe, via the journal and the persisted strategy state.
+   - It supports a kill switch, SIGINT/SIGTERM shutdown, a heartbeat and `status.json`.
+2. ~~**Strategy adapter and live candle feed.**~~ **Done:** `tradebot.live.bridge.LiveStrategy` runs any backtested `Strategy` on live Binance candles (`BarBuffer`). Tests assert live weights equal backtest weights on real data.
+   - Not built: a Roostoo-ticker fallback when Binance is unreachable. The bot holds its book on stale candles instead.
 3. **AWS EC2 deployment.**
    - There is nothing for it yet.
    - **Needed:** a setup script (Python 3.11+, venv, `pip install .`), a systemd unit with `Restart=always`, log rotation, `.env` provisioning and a short runbook.
@@ -75,11 +77,14 @@ A review of the whole repository against the hackathon rules (autonomous bot on 
    - `reconcile_uncertain_intent` exists but nothing calls it.
    - Short opens with status `OPEN` are treated as resolved.
    - There are no fills table and no realised-P&L record.
-7. **Live performance records.** The rules recommend logging performance internally. Equity snapshots, a heartbeat and live Sharpe/Sortino/Calmar are configured (`equity_snapshot_interval_seconds`, `heart_beat_interval_seconds`) but not implemented. `core.metrics` can compute them once equity is recorded.
+7. ~~**Live performance records.**~~ **Mostly done:**
+   - The runner appends one account snapshot per 15m bar to `snapshots.jsonl`, logs a heartbeat, and keeps the engine audit log.
+   - The dashboard (`tradebot dashboard --source engine`) computes Sharpe, Sortino and Calmar from these.
+   - The engine's own `equity_snapshot_interval_seconds` / `heart_beat_interval_seconds` settings remain reserved.
 8. **Risk defaults don't fit a $100k portfolio.**
    - These would reject typical targets: `max_total_short_collateral_usd: 10000`, `max_per_symbol_exposure: 0.35`, and `max_order_value_usd: 25000`. The last is checked *before* child-order splitting.
    - A breach rejects the **whole** signal instead of scaling it down.
-   - These limits need tuning to the strategy.
+   - **Tuned for RXM** in `config/competition.yaml`. The defaults still don't fit, and whole-signal rejection remains.
 
 ### P2: correctness gaps
 9. **Exchange rules aren't checked before sending.** The engine doesn't check `MiniOrder` or precision before sending. A rejected child order becomes `UNCERTAIN` and **aborts the rest of the plan**.
@@ -115,3 +120,41 @@ These should be closed, or at least accounted for, before relying on backtest nu
   - Every client endpoint responds.
   - `exchangeInfo` is fetched once.
   - A full engine cycle on the real account, with orders intercepted, produced a LIMIT buy at the last price and a LIMIT short open.
+
+## 6. RXM port and live runner (Oct 3)
+
+The quant's branch (`strategy/noise-cancelling-momentum`) was built on the pre-refactor layout. It was ported into the package as follows:
+
+| Quant's file | Now |
+|---|---|
+| `backtest/strategies/rxm.py` | `tradebot/strategy/library/rxm.py` (logic unchanged; golden weights reproduce to 1e-12) |
+| `backtest/engine.py` changes (lock-in, latency stress, gap toggle, dust fixes) | `tradebot/backtest/simulator.py`, `BacktestConfig` |
+| `backtest/experiments.py`, `tune.py` | `tradebot/research/` |
+| `src/strategy_bridge/*` | `tradebot/live/` (bridge, market_data, repeg, throttle); `ReplayExchangePort` → `tradebot/exchange/replay.py` |
+| `src/guard/checks.py` | `tradebot/live/guard.py` |
+| `dashboard/` | `tradebot/dashboard/` (`python -m tradebot dashboard`) |
+| `scripts/run_live.py`, `run_comp_mock.py` | `python -m tradebot live`, `python -m tradebot replay` (both use `LiveRunner`) |
+| `competition_config.yaml` | `config/competition.yaml` |
+
+**Problems found and fixed during the port:**
+
+| Severity | Problem | Fix |
+|---|---|---|
+| High | **The guard (16 checks, kill switch) never ran live.** The live script didn't call it; only the dashboard did, although the spec lists it as layer L6. | Portfolio checks run on the engine's whole plan before anything is sent (a new `plan_check` hook next to the risk manager). Per-order checks (fat finger, size, self-cross, rate, kill switch) run at send time in `GuardedPort`. Every loop runs the guard's poll, and the kill switch pauses the loop. |
+| **Critical** | **After the lock-in, the guard blocked the de-risking sells.** Its `lockin` check blocked any order while the gross target exceeded 0.32, including sells that *reduce* gross. A blocked order stops the plan. In a 7-day replay, the book stayed at full size for 3 days after locking (223 blocked ARB sells). This would have defeated the competition lock-in. | Lock-in, like the exposure checks, now blocks only orders that move gross *up*. Regression test added. |
+| High | Checking portfolio limits order by order rejects normal rebalances. The engine sends all buys before the shorts, so mid-batch net exposure looks too long. | Portfolio checks judge the full plan once, as the guard was designed for (`pre_trade` on a batch). |
+| High | **With its default caps the guard would have blocked RXM's own rebalances.** Its per-coin cap of 0.40 is below RXM's ~0.55 and its per-order cap of 0.40 is below the 0.5 child orders. | Caps for RXM in `config/competition.yaml`; a test shows the rejection with tight caps. |
+| High | Status-file writes could crash the runner. On Windows another process briefly holding `status.json` made `os.replace` fail outside the error handling. Found by the replay. | Ops-file writes retry and never raise, and the loop's bookkeeping can't stop trading. Regression test added. |
+| Medium | Long exits were market orders (0.1%), against the backtest's 5 bp passive limits. This was the quant's own listed gap. | Exits are limits at `execution.limit_offset_bps` (5 bp) and are re-pegged before sending, like entries. |
+| Medium | The rate limiter's request weights counted the old client's extra serverTime and exchangeInfo calls. | Weights match `RoostooClient`: one request per call. |
+| Medium | The guard's starting equity defaulted to $100k, so a different account size showed a false drawdown warning every loop. | Anchored to the account's real starting equity. |
+| Low | The guard warned "stale data" on every loop because it wasn't told when prices were read. | The guard receives the snapshot read time. |
+| Low | The replay exchange returned balances under `Wallet`; real Roostoo uses `SpotWallet`. | Matches the real shape. |
+| — | Kept from the quant's branch: full short exits with `close_pct=100` (no residual on a losing short); long exits sized at the snapshot price (no oversell after a down-tick); the Binance Vision S3 fallback. | |
+
+**Verification:**
+- 144 tests pass. These include golden RXM weights on real data, live-equals-backtest weights for both presets, the full live stack down to signed HTTP requests, and runner recovery, kill switch, restarts and guard.
+- A 7-day replay through `LiveRunner` (Sept 1–8, comp) returned **+7.75%, against +7.87% from the backtest simulator**. The guard blocked nothing, and gross exposure fell from 0.97 to 0.31 after the Sept 5 lock-in. API use averaged 5 requests/min (peak 19).
+- A dry run against the Roostoo mock exchange with live Binance candles computed the day's real target and sent nothing.
+
+Still open for the competition: AWS deployment files (P0 3), key rotation (P0 4), and the test-account checks in `docs/LIVE_RUNBOOK.md` section 5.

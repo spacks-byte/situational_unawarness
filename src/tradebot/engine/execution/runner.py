@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from tradebot.core.config import ExecutionConfig
@@ -18,9 +19,11 @@ class ExecutionRunner:
 
     Order policy (config.order_policy):
       - "limit_only" (default): spot buys, spot sells and short opens are LIMIT orders at the
-        target's limit_price, or else the snapshot's last price. Unfilled orders are cancelled after
+        target's limit_price, or else the snapshot's last price moved limit_offset_bps to the passive
+        side (buys below, sells and short opens above). Unfilled orders are cancelled after
         fill_timeout_seconds and the next signal re-places them at the new price (the backtest models
-        the same one-bar lifetime). Short closes are always market: Roostoo's API takes no price.
+        the same one-bar lifetime). Short closes are always market: Roostoo's API takes no price,
+        and a full short exit is one close_pct=100 call, so a losing short leaves no residual.
       - "limit_or_market": LIMIT only when the target sets limit_price and urgency isn't high.
     """
 
@@ -32,6 +35,9 @@ class ExecutionRunner:
         self.audit_log = audit_log
         self.risk_state = risk_state
         self._prices: dict[str, float] = {}
+        # Optional extra gate on the whole plan, run after the risk manager:
+        # plan_check(plan, actual, equity) -> list of rejection reasons ([] = allowed)
+        self.plan_check: Callable[[dict[str, Any], dict[str, Any], float], list[str]] | None = None
 
     def execute(
         self,
@@ -58,11 +64,14 @@ class ExecutionRunner:
             self._audit("risk_rejection", result)
             return result
         decision = self.risk.evaluate(plan, actual, total_equity_usd, state=self.risk_state)
-        if not decision.allowed:
+        reasons = list(decision.reasons)
+        if decision.allowed and self.plan_check is not None:
+            reasons = list(self.plan_check(plan, actual, total_equity_usd))
+        if reasons:
             result = {
                 "status": "REJECTED_RISK",
                 "signal_id": target.signal_id,
-                "reasons": list(decision.reasons),
+                "reasons": reasons,
                 "operations": [],
             }
             self._audit("risk_rejection", result)
@@ -85,7 +94,10 @@ class ExecutionRunner:
         child_index = 0
         for kind, amounts, target_by_symbol in actions:
             for symbol, amount in amounts.items():
-                for child_amount in self._split_amount(float(amount), total_equity_usd):
+                # A full short exit is one close_pct=100 call (see _dispatch), never sliced
+                full_short_exit = kind == "close_short" and symbol not in target_by_symbol
+                children = [float(amount)] if full_short_exit else self._split_amount(float(amount), total_equity_usd)
+                for child_amount in children:
                     operation = self._execute_one(
                         target,
                         kind,
@@ -186,10 +198,14 @@ class ExecutionRunner:
 
         pair = to_pair(symbol)
         if kind == "close_short":
+            if target_config is None:
+                # Full exit. Sizing by collateral / price under-closes a losing short (the collateral
+                # was posted at the lower entry price) and would leave a residual position.
+                return self.port.close_short(pair, close_pct=100)
             quantity = amount_usd / self._market_price(symbol, "MinAsk")
             return self.port.close_short(pair, close_qty=quantity)
 
-        limit_price = self._order_price(symbol, target_config)
+        limit_price = self._order_price(symbol, target_config, passive_above=kind != "open_long")
         if kind == "open_short":
             return self.port.open_short(pair, amount_usd, price=limit_price)
 
@@ -224,11 +240,16 @@ class ExecutionRunner:
             }
         return filtered
 
-    def _order_price(self, symbol: str, target_config: LongTarget | ShortTarget | None) -> float | None:
-        """Limit price for spot orders and short opens; None means a market order."""
+    def _order_price(self, symbol: str, target_config: LongTarget | ShortTarget | None,
+                     passive_above: bool = False) -> float | None:
+        """Limit price for spot orders and short opens; None means a market order.
+        passive_above: True for sells and short opens (rest above the market), False for buys."""
         explicit = getattr(target_config, "limit_price", None) if target_config is not None else None
         if self.config.order_policy == "limit_only":
-            return float(explicit) if explicit else self._market_price(symbol)
+            if explicit:
+                return float(explicit)
+            offset = self.config.limit_offset_bps / 1e4
+            return self._market_price(symbol) * (1 + offset if passive_above else 1 - offset)
         if target_config is None or not self.config.supports_limit_orders:
             return None
         if getattr(target_config.urgency, "value", target_config.urgency) == "high":

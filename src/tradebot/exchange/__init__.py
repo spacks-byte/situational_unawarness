@@ -2,5 +2,6 @@
 from tradebot.exchange.client import RoostooClient, RoostooError
 from tradebot.exchange.mock import MockExchangePort
 from tradebot.exchange.port import ExchangePort, RoostooExchangePort
+from tradebot.exchange.replay import ReplayExchangePort
 
-__all__ = ["ExchangePort", "MockExchangePort", "RoostooClient", "RoostooError", "RoostooExchangePort"]
+__all__ = ["ExchangePort", "MockExchangePort", "ReplayExchangePort", "RoostooClient", "RoostooError", "RoostooExchangePort"]
