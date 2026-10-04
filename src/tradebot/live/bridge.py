@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -33,7 +34,7 @@ import pandas as pd
 from tradebot.core.clock import Clock, RealClock
 from tradebot.core.symbols import to_coin
 from tradebot.engine.reconcile.plan import pending_open_exposure
-from tradebot.engine.schema.models import LongTarget, ShortTarget, TargetPortfolio
+from tradebot.engine.schema.models import LongTarget, ShortTarget, TargetPortfolio, Urgency
 from tradebot.live.market_data import BAR, BarBuffer, last_closed_bar_open
 from tradebot.strategy.base import Strategy
 from tradebot.strategy.library.rxm import PRESETS, ResidualMomentum, preset
@@ -103,6 +104,10 @@ class LiveStrategy:
         min_trade_usd: float = 20.0,
         max_equity_jump: float = 0.5,
         bar_grace: pd.Timedelta = pd.Timedelta(minutes=30),
+        escalate: bool = False,
+        ladder_bps: list[float] | None = None,
+        cross_bps: float = 10.0,
+        reanchor_polls: int = 3,
     ) -> None:
         self.strategy = strategy
         self.buffer = buffer
@@ -121,6 +126,16 @@ class LiveStrategy:
         self.min_trade_usd = min_trade_usd
         self.max_equity_jump = max_equity_jump
         self.bar_grace = bar_grace
+        # Escalation ladder: attempt n of a symbol that is still off target rests ladder[n] bp passive;
+        # once the ladder is used up it crosses (buys/sells cross_bps through the last price, short
+        # opens at market: a Roostoo short limit below the market waits for the price to drop to it)
+        self.escalate = escalate
+        self.ladder = [float(x) / 1e4 for x in (ladder_bps if ladder_bps is not None else [limit_offset_bps, 0.0])]
+        self.cross = cross_bps / 1e4
+        self._attempts: dict[str, int] = {}
+        self.reanchor_polls = max(1, int(reanchor_polls))
+        self._rejected: list[float] = []
+        self._last_longs: dict[str, float] = {}
         rebalance_h = strategy.params.get("rebalance_h")
         self.rebalance_every = pd.Timedelta(hours=int(rebalance_h)) if rebalance_h else BAR
         self._ref_equity: float | None = None
@@ -148,12 +163,14 @@ class LiveStrategy:
     def __call__(self, snapshot: dict[str, Any]) -> TargetPortfolio:
         now = pd.Timestamp(self.clock.now()).tz_convert("UTC")
         equity = float(snapshot.get("equity_usd", 0.0))
-        ref = self._ref_equity or self.state.get("start_equity")
-        if equity <= 0 or (ref and abs(equity / float(ref) - 1.0) > self.max_equity_jump):
-            log.error("snapshot rejected: equity %.2f vs reference %s (partial API read?)", equity, ref)
-            raise SnapshotRejected(f"implausible equity {equity:.2f} (reference {ref})")
-        self._ref_equity = equity
-        self._update_lock(equity, now)
+        self._check_equity(equity)
+        unpriced = [c for c in (snapshot.get("unpriced") or {}) if self._last_longs.get(c, 0.0) > self.min_trade_usd]
+        if unpriced:
+            # A held coin with no price is missing from longs and equity: every target would shrink
+            log.error("snapshot rejected: no Roostoo price for held %s", unpriced)
+            raise SnapshotRejected(f"no price for held coins {unpriced}")
+        self._last_longs = dict(snapshot.get("longs") or {})
+        self._update_lock(equity, now, snapshot)
         self.buffer.update(now)
         self._refresh_weights(now)
 
@@ -163,7 +180,9 @@ class LiveStrategy:
                               bar_now, "no signal yet (insufficient/stale data): hold current book")
 
         base = f"{self.prefix}-{self.weights_bar:%Y%m%dT%H%M}" + ("-L" if self.locked else "")
-        longs, shorts, traded, desired = self._build(snapshot)
+        if base != self._base_id:
+            self._attempts = {}                     # new weights: every symbol starts passive again
+        longs, shorts, traded, desired, exits = self._build(snapshot)
         if base != self._base_id:
             prev, self._base_id = self._base_id, base
             if self._last_target is None or prev is None:
@@ -172,12 +191,52 @@ class LiveStrategy:
                 reason = "lock-in: weights scaled"
             else:
                 reason = "daily rebalance" if self.rebalance_every >= pd.Timedelta(days=1) else "rebalance"
-            return self._emit(self._portfolio(base, now, longs, shorts, reason, desired, traded), base, bar_now, reason)
+            self._count_attempts(traded)
+            return self._emit(self._portfolio(base, now, longs, shorts, reason, desired, traded, exits), base, bar_now, reason)
         if self.requote and traded and bar_now != self._last_emit_bar:
             sid = f"{base}-r{bar_now:%Y%m%dT%H%M}"
             reason = f"re-quote off-target symbols {traded}"
-            return self._emit(self._portfolio(sid, now, longs, shorts, reason, desired, traded), sid, bar_now, reason)
+            self._count_attempts(traded)
+            return self._emit(self._portfolio(sid, now, longs, shorts, reason, desired, traded, exits), sid, bar_now, reason)
         return self._last_target   # unchanged: the engine treats it as a duplicate signal
+
+    # ------------------------------------------------------------------ snapshot sanity
+    def _check_equity(self, equity: float) -> None:
+        """Reject an implausible equity reading (partial API read), symmetrically in log terms.
+
+        The old check (|E/ref - 1| > jump against the last ACCEPTED reading) accepted a -34% reading
+        and then rejected the true value (+52% from it) on every loop, freezing the bot for good.
+        Now a drop is judged like the rise that undoes it, and `reanchor_polls` consecutive rejected
+        readings that agree within 2% become the new reference (a level that persists is not a glitch).
+        """
+        ref = self._ref_equity or self.state.get("start_equity")
+        band = math.log1p(self.max_equity_jump)
+        if equity > 0 and (not ref or abs(math.log(equity / float(ref))) <= band):
+            self._ref_equity, self._rejected = equity, []
+            return
+        if equity > 0:
+            self._rejected = (self._rejected + [equity])[-self.reanchor_polls:]
+            lo, hi = min(self._rejected), max(self._rejected)
+            if len(self._rejected) >= self.reanchor_polls and hi / lo - 1 <= 0.02:
+                log.warning("equity reference re-anchored from %s to %.2f after %d consistent readings",
+                            ref, equity, len(self._rejected))
+                self._ref_equity, self._rejected = equity, []
+                return
+        log.error("snapshot rejected: equity %.2f vs reference %s (partial API read?)", equity, ref)
+        raise SnapshotRejected(f"implausible equity {equity:.2f} (reference {ref})")
+
+    def _count_attempts(self, traded: list[str]) -> None:
+        self._attempts = {s: self._attempts.get(s, 0) + 1 for s in traded}
+
+    def _limit(self, symbol: str, price: float, side: int) -> float | None:
+        """Limit price for the next order on `symbol`; side +1 buys, -1 sells / opens shorts.
+        None = market (only for short opens once the ladder is used up)."""
+        n = self._attempts.get(symbol, 0)
+        if not self.escalate:
+            return price * (1 - side * self.offset)
+        if n < len(self.ladder):
+            return price * (1 - side * self.ladder[n])
+        return price * (1 + side * self.cross)
 
     def scaled_weights(self) -> dict[str, float]:
         """Weights by coin after lock-in scaling and the cash/fee gross cap."""
@@ -226,7 +285,7 @@ class LiveStrategy:
         for s, v in pend_s.items():
             cur_s.setdefault(s, v)
         desired = self.scaled_weights()
-        missing = [s for s in desired if prices.get(s, 0.0) <= 0]
+        missing = [s for s in set(desired) | set(cur_s) if prices.get(s, 0.0) <= 0]
         if missing:
             log.warning("no Roostoo price for %s: not traded", missing)
             desired = {s: v for s, v in desired.items() if s not in missing}
@@ -234,10 +293,17 @@ class LiveStrategy:
         longs: list[LongTarget] = []
         shorts: list[ShortTarget] = []
         traded: list[str] = []
+        exits: dict[str, float] = {}
         held = {k for k, v in cur_l.items() if v > 0} | {k for k, v in cur_s.items() if v > 0}
         for s in sorted(set(desired) | held):
             w = desired.get(s, 0.0)
             have_l, have_s = cur_l.get(s, 0.0), cur_s.get(s, 0.0)
+            if s in missing:   # no price: never trade it, not even an exit (a short would close at market)
+                if have_l > 0:
+                    longs.append(LongTarget(symbol=s, notional_usd=have_l))
+                if have_s > 0:
+                    shorts.append(ShortTarget(symbol=s, collateral_usd=have_s))
+                continue
             cur_w = (have_l - have_s) / equity if equity > 0 else 0.0
             dust = self.min_trade_usd
             exit_side = (w <= 0 and have_l > dust) or (w >= 0 and have_s > dust)
@@ -246,28 +312,49 @@ class LiveStrategy:
                 traded.append(s)
                 price = prices.get(s, 0.0)
                 if w > 0:
-                    longs.append(LongTarget(symbol=s, weight=min(w, 1.0), limit_price=price * (1 - self.offset)))
+                    # priced on the side of the trade: a trim sells above the market, not 5 bp below it
+                    buying = w * equity >= have_l
+                    longs.append(LongTarget(symbol=s, weight=min(w, 1.0), limit_price=self._limit(s, price, 1 if buying else -1),
+                                            urgency=Urgency.HIGH if self._crossing(s) else Urgency.NORMAL))
                 elif w < 0:
-                    shorts.append(ShortTarget(symbol=s, collateral_usd=abs(w) * equity,
-                                              limit_price=price * (1 + self.offset)))
+                    limit = self._limit(s, price, -1)
+                    if self._crossing(s):    # short opens can't cross on Roostoo: market (same 0.1% fee)
+                        shorts.append(ShortTarget(symbol=s, collateral_usd=abs(w) * equity, urgency=Urgency.HIGH))
+                    else:
+                        shorts.append(ShortTarget(symbol=s, collateral_usd=abs(w) * equity, limit_price=limit))
+                if w <= 0 and have_l > dust and price > 0:
+                    exits[s] = self._limit(s, price, -1)
             else:   # within band: freeze at the current size so the engine leaves it alone
                 if have_l > 0:
                     longs.append(LongTarget(symbol=s, notional_usd=have_l))
                 if have_s > 0:
                     shorts.append(ShortTarget(symbol=s, collateral_usd=have_s))
-        return longs, shorts, traded, desired
+        return longs, shorts, traded, desired, exits
 
-    def _portfolio(self, sid, now, longs, shorts, reason, desired, traded) -> TargetPortfolio:
+    def _crossing(self, symbol: str) -> bool:
+        return self.escalate and self._attempts.get(symbol, 0) >= len(self.ladder)
+
+    def _portfolio(self, sid, now, longs, shorts, reason, desired, traded, exits=None) -> TargetPortfolio:
         gross = sum(abs(v) for v in desired.values())
+        steps = {s: self._attempts.get(s, 0) for s in traded} if self.escalate else {}
         text = (f"{reason} | mode={self.prefix} bar={self.weights_bar} locked={self.locked} "
-                f"gross={gross:.3f} trade={traded} "
+                f"gross={gross:.3f} trade={traded} " + (f"attempt={steps} " if steps else "") +
                 f"w={ {k: round(v, 4) for k, v in sorted(desired.items(), key=lambda kv: -kv[1])} }")
         return TargetPortfolio(strategy_id=self.strategy_id, strategy_version=self.strategy_version,
-                               signal_id=sid, timestamp=now.to_pydatetime(), longs=longs, shorts=shorts, reason=text)
+                               signal_id=sid, timestamp=now.to_pydatetime(), longs=longs, shorts=shorts, reason=text,
+                               exit_prices=exits or {})
 
     def _hold_target(self, snapshot: dict[str, Any], now: pd.Timestamp) -> TargetPortfolio:
-        longs = [LongTarget(symbol=s, notional_usd=float(v)) for s, v in (snapshot.get("longs") or {}).items() if v > 0]
-        shorts = [ShortTarget(symbol=s, collateral_usd=float(v)) for s, v in (snapshot.get("shorts") or {}).items() if v > 0]
+        # positions + resting orders, as the engine's plan counts them, so holding never trades
+        pend_l, pend_s = pending_open_exposure(snapshot.get("pending_orders"))
+        cur_l = {s: float(v) for s, v in (snapshot.get("longs") or {}).items()}
+        cur_s = {s: float(v) for s, v in (snapshot.get("shorts") or {}).items()}
+        for s, v in pend_l.items():
+            cur_l[s] = cur_l.get(s, 0.0) + v
+        for s, v in pend_s.items():
+            cur_s[s] = cur_s.get(s, 0.0) + v
+        longs = [LongTarget(symbol=s, notional_usd=v) for s, v in cur_l.items() if v > 0]
+        shorts = [ShortTarget(symbol=s, collateral_usd=v) for s, v in cur_s.items() if v > 0]
         return TargetPortfolio(strategy_id=self.strategy_id, strategy_version=self.strategy_version,
                                signal_id="placeholder", timestamp=now.to_pydatetime(), longs=longs, shorts=shorts,
                                reason="hold")
@@ -284,7 +371,7 @@ class LiveStrategy:
         return target
 
     # ------------------------------------------------------------------ lock-in
-    def _update_lock(self, equity: float, now: pd.Timestamp) -> None:
+    def _update_lock(self, equity: float, now: pd.Timestamp, snapshot: dict[str, Any] | None = None) -> None:
         if equity <= 0:
             return
         if self.state.get("start_equity") is None:
@@ -294,6 +381,12 @@ class LiveStrategy:
         if self.lockin_return <= 0 or self.locked:
             return
         ret = equity / float(self.state.get("start_equity")) - 1.0
+        unexplained = float((snapshot or {}).get("lock_unexplained_usd", 0.0) or 0.0)
+        if ret >= self.lockin_return and unexplained > 0.01 * equity:
+            # The lock is permanent: never take it on an equity that contains USD Lock nobody can explain
+            log.error("lock-in NOT counted: return %.2f%% includes %.2f of unexplained USD Lock", 100 * ret, unexplained)
+            self._lock_streak = 0
+            return
         self._lock_streak = self._lock_streak + 1 if ret >= self.lockin_return else 0
         if self._lock_streak >= self.lock_confirmations:
             self.state.update(locked=True, lock_time=now.isoformat(), lock_equity=equity, lock_return=ret)

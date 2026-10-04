@@ -60,6 +60,8 @@ class TargetPortfolio(BaseModel):
     longs: list[LongTarget] = Field(default_factory=list)
     shorts: list[ShortTarget] = Field(default_factory=list)
     flatten: list[str] = Field(default_factory=list)
+    # Limit prices for longs the target drops (exits); symbols not listed exit at the config offset
+    exit_prices: dict[str, float] = Field(default_factory=dict)
     reason: str | None = None
 
     @model_validator(mode="after")
@@ -78,4 +80,5 @@ class TargetPortfolio(BaseModel):
             raise ValueError("Duplicate short symbols are not allowed")
         normalized_flatten = [s.strip().upper() for s in self.flatten]
         self.flatten = list(dict.fromkeys(s for s in normalized_flatten if s))
+        self.exit_prices = {s.strip().upper(): float(p) for s, p in self.exit_prices.items() if p and p > 0}
         return self

@@ -6,7 +6,7 @@ from typing import Any
 from tradebot.core.config import ExecutionConfig
 from tradebot.core.symbols import to_pair
 from tradebot.exchange.port import ExchangePort
-from tradebot.engine.reconcile.plan import compute_rebalance_plan
+from tradebot.engine.reconcile.plan import compute_rebalance_plan, pending_open_exposure
 from tradebot.engine.risk.manager import RiskManager, RiskState
 from tradebot.engine.schema.models import LongTarget, ShortTarget, TargetPortfolio
 from tradebot.engine.state.audit_log import AuditLog
@@ -55,10 +55,12 @@ class ExecutionRunner:
             self._audit("execution", result)
             return result
 
-        plan = self._apply_no_trade_band(
+        # The plan is diffed against positions + resting orders; judge it against the same state
+        effective = self._with_resting_orders(actual)
+        plan = self._fit_opens_to_cash(self._apply_no_trade_band(
             compute_rebalance_plan(target, actual, total_equity_usd),
             total_equity_usd,
-        )
+        ), effective)
         if getattr(self.port, "is_live", False) and not self.config.dry_run and not self.config.live_mode:
             result = {
                 "status": "REJECTED_RISK",
@@ -68,9 +70,10 @@ class ExecutionRunner:
             }
             self._audit("risk_rejection", result)
             return result
-        decision = self.risk.evaluate(plan, actual, total_equity_usd, state=self.risk_state)
+        decision = self.risk.evaluate(plan, effective, total_equity_usd, state=self.risk_state)
         reasons = list(decision.reasons)
         if decision.allowed and self.plan_check is not None:
+            # plan_check gets the raw snapshot: the live guard projects resting orders itself
             reasons = list(self.plan_check(plan, actual, total_equity_usd))
         if reasons:
             result = {
@@ -86,6 +89,7 @@ class ExecutionRunner:
             self._audit("execution", result)
             return result
         self._prices = {str(k).upper(): float(v) for k, v in (actual.get("prices") or {}).items()}
+        self._exit_prices = dict(target.exit_prices or {})
         long_targets = {item.symbol.upper(): item for item in target.longs}
         short_targets = {item.symbol.upper(): item for item in target.shorts}
         operations: list[dict[str, Any]] = []
@@ -162,6 +166,11 @@ class ExecutionRunner:
         after_values = after.get("longs" if "long" in intent.kind else "shorts", {}) or {}
         before_amount = float(before_values.get(intent.symbol, 0.0))
         after_amount = float(after_values.get(intent.symbol, 0.0))
+        if "long" in intent.kind:   # longs are USD at market: compare the same coins at today's price
+            p0 = float(before.get("price") or 0.0)
+            p1 = float((after.get("prices") or {}).get(intent.symbol) or 0.0)
+            if p0 > 0 and p1 > 0:
+                before_amount *= p1 / p0
         expected = float(intent.payload.get("amount_usd", 0.0))
         observed_delta = after_amount - before_amount
         if intent.kind.startswith("close_"):
@@ -190,7 +199,8 @@ class ExecutionRunner:
         exposure_key = "longs" if kind.endswith("long") else "shorts"
         payload = {
             "amount_usd": amount_usd,
-            "before": {exposure_key: {symbol: float((actual.get(exposure_key) or {}).get(symbol, 0.0))}},
+            "before": {exposure_key: {symbol: float((actual.get(exposure_key) or {}).get(symbol, 0.0))},
+                       "price": float((actual.get("prices") or {}).get(symbol, 0.0) or 0.0)},
         }
         intent = IntentRecord.build(
             signal_id=target.signal_id,
@@ -254,6 +264,46 @@ class ExecutionRunner:
         scale = max(budget, 0.0) / cost
         return {symbol: amount * scale for symbol, amount in amounts.items() if amount * scale >= 1.0}
 
+    @staticmethod
+    def _with_resting_orders(actual: dict[str, Any]) -> dict[str, Any]:
+        """Positions and cash as if every resting order had filled (a resting buy's USD is already in
+        cash_usd as Lock, a resting sell's coins in the long): the state the plan is computed against."""
+        pend_l, pend_s = pending_open_exposure(actual.get("pending_orders"))
+        if not pend_l and not pend_s:
+            return actual
+        longs = {str(k).upper(): float(v) for k, v in (actual.get("longs") or {}).items()}
+        shorts = {str(k).upper(): float(v) for k, v in (actual.get("shorts") or {}).items()}
+        cash = float(actual.get("cash_usd", 0.0))
+        for symbol, amount in pend_l.items():
+            longs[symbol] = max(longs.get(symbol, 0.0) + amount, 0.0)
+            cash -= amount
+        for symbol, amount in pend_s.items():
+            shorts[symbol] = shorts.get(symbol, 0.0) + amount
+            cash -= amount
+        return {**actual, "longs": longs, "shorts": shorts, "cash_usd": cash}
+
+    def _fit_opens_to_cash(self, plan: dict[str, Any], actual: dict[str, Any]) -> dict[str, Any]:
+        """Scale the plan's opens to cash + close proceeds - reserve, so the cash check never rejects it.
+
+        Equity can hold value the account cannot spend yet (unrealized profit on open shorts is in
+        equity, so in every weight * equity target, but only becomes cash when the short is closed).
+        The plan then asks for more cash than exists and the risk manager used to reject the WHOLE
+        plan, closes and exits included, on every loop until that profit went away."""
+        fees = self.config.fees
+        spot_fee = fees.spot_maker if self.config.order_policy == "limit_only" else fees.spot_taker
+        available = float(actual.get("cash_usd", 0.0)) - self.config.min_cash_reserve_usd - 1.0
+        available += sum(plan["close_longs"].values()) * (1.0 - spot_fee)
+        available += sum(plan["close_shorts"].values()) * (1.0 - fees.short_close)
+        cost = (sum(plan["open_longs"].values()) * (1.0 + spot_fee)
+                + sum(plan["open_shorts"].values()) * (1.0 + fees.short_open))
+        if cost <= 0 or cost <= available:
+            return plan
+        scale = max(available, 0.0) / cost
+        fitted = dict(plan)
+        for key in ("open_longs", "open_shorts"):
+            fitted[key] = {s: a * scale for s, a in plan[key].items() if a * scale >= 1.0}
+        return fitted
+
     def _open_fee(self, kind: str) -> float:
         return self.config.fees.short_open if kind == "open_short" else self.config.fees.spot_maker
 
@@ -286,11 +336,18 @@ class ExecutionRunner:
     def _order_price(self, symbol: str, target_config: LongTarget | ShortTarget | None,
                      passive_above: bool = False) -> float | None:
         """Limit price for spot orders and short opens; None means a market order.
-        passive_above: True for sells and short opens (rest above the market), False for buys."""
-        explicit = getattr(target_config, "limit_price", None) if target_config is not None else None
+        passive_above: True for sells and short opens (rest above the market), False for buys.
+        Under limit_only an explicit limit price always wins; a HIGH-urgency target without one is
+        sent at market (the escalation ladder's last step for short opens, which can't cross on Roostoo)."""
+        if target_config is not None:
+            explicit = getattr(target_config, "limit_price", None)
+        else:
+            explicit = getattr(self, "_exit_prices", {}).get(symbol.upper())
         if self.config.order_policy == "limit_only":
             if explicit:
                 return float(explicit)
+            if target_config is not None and getattr(target_config.urgency, "value", target_config.urgency) == "high":
+                return None
             offset = self.config.limit_offset_bps / 1e4
             return self._market_price(symbol) * (1 + offset if passive_above else 1 - offset)
         if target_config is None or not self.config.supports_limit_orders:

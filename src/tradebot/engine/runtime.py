@@ -22,7 +22,10 @@ class EngineRuntime:
         self.pending_timeout_seconds = pending_timeout_seconds or runner.config.fill_timeout_seconds
 
     def run_once(self, strategy: Callable[[dict[str, Any]], TargetPortfolio]) -> dict[str, Any]:
-        cancel_stale_orders(self.runner.port, self.clock, self.pending_timeout_seconds)
+        cancelled = cancel_stale_orders(self.runner.port, self.clock, self.pending_timeout_seconds,
+                                        grace_seconds=self.poll_interval_seconds)
+        if cancelled and self.runner.config.cancel_settle_seconds > 0:
+            self.clock.sleep(self.runner.config.cancel_settle_seconds)
         snapshot = read_exchange_snapshot(self.runner.port)
         self.runner.reconcile_uncertain_intents(snapshot)
         target = strategy(snapshot)

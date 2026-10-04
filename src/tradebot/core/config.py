@@ -89,6 +89,9 @@ class ExecutionConfig(_Section):
     equity_snapshot_interval_seconds: int = 300
     heart_beat_interval_seconds: int = 60
     pending_short_ttl_seconds: int = 900
+    # After cancelling stale orders, wait this long before reading the account (the exchange may
+    # release the locked USD a moment after it acknowledges the cancel)
+    cancel_settle_seconds: float = 2.0
 
     # Filled from the top-level `fees` section by Settings; not set in YAML
     fees: FeeSchedule = Field(default_factory=FeeSchedule)
@@ -159,6 +162,12 @@ class LiveConfig(_Section):
     max_http_per_minute: int = 25         # Roostoo allows 30
     repeg: bool = True                    # re-price each limit off a fresh ticker just before sending
     repeg_max_move: float = 0.03          # skip the order if the price moved more than this since the signal
+    # Escalation ladder for symbols still off target (bounded time to target): attempt n rests
+    # ladder_bps[n] passive (first = the strategy offset), then buys/sells cross by cross_bps and short
+    # opens go at market. Attempts are ~16 min apart (fill_timeout + one poll). Off = passive forever.
+    escalate: bool = False
+    ladder_bps: list[float] | None = None  # None = [strategy offset, 0]
+    cross_bps: float = 10.0
     # Supervision
     kill_file: str = "KILL"               # create this file to stop all new orders; delete it to resume
     heartbeat_minutes: int = 15
