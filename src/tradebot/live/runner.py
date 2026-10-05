@@ -215,7 +215,7 @@ class LiveRunner:
     """Builds the live stack from Settings and runs it until stopped."""
 
     def __init__(self, settings: Settings, *, mode: RunMode = "dry-run", port: Any = None,
-                 fetch: FetchFn | None = None, clock: Clock | None = None) -> None:
+                 fetch: FetchFn | None = None, clock: Clock | None = None, shared_account: bool = False) -> None:
         self.settings = settings
         self.mode = mode
         cfg = settings.live
@@ -235,12 +235,17 @@ class LiveRunner:
         if mode == "live" and not getattr(port, "is_live", False):
             raise ValueError("live mode needs the real exchange port")
 
+        self.account_lock = None
+        if not shared_account and getattr(port, "is_live", False):
+            from tradebot.engine.state.portfolio import AccountLock
+            self.account_lock = AccountLock(settings.market_making.account_lock)
+
         self.buffer = BarBuffer(_universe(settings), fetch or binance_public_fetch(cfg.klines_url),
                                 window_days=cfg.buffer_days)
         self.strategy = build_live_strategy(settings, self.buffer, self.state_dir / "strategy_state.json", self.clock)
         self.guard = Guard(_guard_config(settings, self.strategy), now=lambda: self.clock.now().astimezone(timezone.utc))
 
-        self.throttled = ThrottledPort(port, self.clock, max_per_minute=cfg.max_http_per_minute)
+        self.throttled = port if shared_account else ThrottledPort(port, self.clock, max_per_minute=cfg.max_http_per_minute)
         self.guarded = GuardedPort(self.throttled, self.guard, lambda: self.last_snapshot, lambda: self._price_times)
         engine_port = RepegPort(self.guarded, self.strategy.offset * 1e4, cfg.repeg_max_move,
                                 reference=lambda: (self.last_snapshot or {}).get("prices")) if cfg.repeg \
@@ -383,6 +388,8 @@ class LiveRunner:
                             else delay)
         finally:
             self.engine.close()
+            if self.account_lock:
+                self.account_lock.close()
             self._write_status("stopped", None)
             log.info("stopped after %d loops", self.iterations)
         return 0
