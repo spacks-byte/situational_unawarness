@@ -39,7 +39,7 @@ from tradebot.core.config import Settings
 from tradebot.core.symbols import to_coin
 from tradebot.engine import Engine
 from tradebot.live.bridge import CompetitionStrategy, LiveStrategy, SnapshotRejected, rxm_spec
-from tradebot.engine.state.snapshot import _remaining_qty
+from tradebot.engine.state.snapshot import remaining_qty
 from tradebot.live.guard import Guard, GuardConfig, ProposedOrder, Status, check_kill_switch, project_snapshot
 from tradebot.live.market_data import BarBuffer, FetchFn, binance_public_fetch
 from tradebot.live.repeg import RepegPort
@@ -135,7 +135,7 @@ def resting_orders(pending: list[dict[str, Any]] | None, prices: dict[str, float
             continue
         coin = to_coin(str(order.get("Pair", "")))
         price = float(order.get("Price") or prices.get(coin, 0.0) or 0.0)
-        qty = _remaining_qty(order)
+        qty = remaining_qty(order)
         if coin and price > 0 and qty > 0:
             out.append(ProposedOrder(coin, side, qty, price, "LIMIT"))
     return out

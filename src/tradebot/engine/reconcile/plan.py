@@ -4,7 +4,7 @@ from typing import Any
 
 from tradebot.core.symbols import to_coin
 from tradebot.engine.schema.models import LongTarget, ShortTarget, TargetPortfolio
-from tradebot.engine.state.snapshot import _remaining_qty
+from tradebot.engine.state.snapshot import remaining_qty
 
 
 def _as_float_map(raw: dict[str, Any] | None) -> dict[str, float]:
@@ -101,7 +101,7 @@ def _pending_open_exposure(orders: list[dict[str, Any]] | None) -> tuple[dict[st
         side = str(order.get("Side", "")).upper()
         qty = float(order.get("Quantity", 0.0) or 0.0)
         # Only the unfilled part is pending: a partial fill already sits in the wallet / short position
-        remaining = _remaining_qty(order)
+        remaining = remaining_qty(order)
         notional = remaining * float(order.get("Price", 0.0) or 0.0)
         if side == "SHORT_OPEN":                    # query_order rows carry no Collateral (Roostoo docs)
             collateral = float(order.get("Collateral", 0.0) or 0.0)

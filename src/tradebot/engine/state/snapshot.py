@@ -3,10 +3,12 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from tradebot.core.config import FeeSchedule
 from tradebot.core.symbols import to_coin, to_pair
 
 
-SHORT_OPEN_FEE = 0.001   # Roostoo locks collateral + 0.1% fee while a limit short open rests
+# Roostoo locks collateral + the short-open fee while a limit short open rests (shared fee schedule)
+SHORT_OPEN_FEE = FeeSchedule().short_open
 
 
 class SnapshotReadError(RuntimeError):
@@ -17,7 +19,7 @@ class SnapshotReadError(RuntimeError):
     """
 
 
-def _remaining_qty(order: dict[str, Any]) -> float:
+def remaining_qty(order: dict[str, Any]) -> float:
     """Unfilled quantity of a resting order. A row whose FilledQuantity is not strictly between 0 and
     Quantity is taken as unfilled (the API docs show PENDING rows with FilledQuantity == Quantity)."""
     qty = _number(order.get("Quantity"))
@@ -34,10 +36,10 @@ def pending_reserved_usd(orders: list[dict[str, Any]], short_fee: float = SHORT_
         side = str(order.get("Side", "")).upper()
         qty, price = _number(order.get("Quantity")), _number(order.get("Price"))
         if side == "BUY":
-            total += _remaining_qty(order) * price
+            total += remaining_qty(order) * price
         elif side == "SHORT_OPEN":
             collateral = _number(order.get("Collateral")) or qty * price
-            total += collateral * (_remaining_qty(order) / qty if qty > 0 else 1.0) * (1 + short_fee)
+            total += collateral * (remaining_qty(order) / qty if qty > 0 else 1.0) * (1 + short_fee)
     return total
 
 

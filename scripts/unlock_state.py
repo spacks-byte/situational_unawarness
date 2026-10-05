@@ -1,7 +1,7 @@
 """Undo a FALSE lock-in persisted in <state_dir>/strategy_state.json (2026-10-04 incident).
 
 Run on the server, with the bot STOPPED and the snapshot fix already deployed (otherwise the old
-code reads ~$114k again and re-locks within two polls). Dry run by default; --apply writes.
+code over-reads equity again and re-locks within two polls). Dry run by default; --apply writes.
 
     python scripts/unlock_state.py --state-dir var/live_comp            # check only
     python scripts/unlock_state.py --state-dir var/live_comp --apply    # back up + unlock
