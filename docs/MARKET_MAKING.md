@@ -248,7 +248,7 @@ extreme inputs without requiring the sibling repository in CI.
 
 ## Recorded validation (2026-10-06)
 
-- `python3 -m pytest -q`: **220 passed, 3 skipped**. The skips are existing RXM
+- `python3 -m pytest -q`: **225 passed, 3 skipped**. The skips are existing RXM
   parity tests requiring parquet files in the default `data/` directory.
 - Native PoC policy parity: **432 matching refresh decisions**, 144 per coin,
   using identical starting inventory/cash, warmup and lag. Price tolerance is
@@ -262,6 +262,12 @@ extreme inputs without requiring the sibling repository in CI.
 - Export reconciliation passed for all three runs: MM cash, quantities and fees
   reconstructed from fills match ending ledgers; realized plus unrealized P&L
   equals net P&L; MM short fees are zero.
+- MM-only 28-day replay, 2026-09-07 through 2026-10-05: **36,372 successful
+  loops and 16,383 fills**, with exported cash, quantities and fees reconciled.
+  This run includes the near-flat inventory roundoff fix: an additional discrepancy
+  allowance of at most `1e-8` USD prevents negligible floating-point residue from
+  falsely blocking reconciliation. It does not rewrite balances or positions;
+  regression tests still reject a genuine one-PEPE discrepancy and invalid prices.
 - A read-only public WebSocket smoke test received fresh PEPE best bid/ask and
   completed one-second candles. This host required its system CA store via
   `SSL_CERT_FILE=/etc/ssl/cert.pem`; TLS verification remained enabled.
