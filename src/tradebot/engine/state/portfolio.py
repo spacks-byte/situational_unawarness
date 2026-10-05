@@ -1,8 +1,17 @@
-"""Durable shared-account allocation and exchange ownership.
+"""Account coordination with a temporary MM/RXM-specific ledger.
 
-One coordinator owns the transport. MM books own cash and spot coins; RXM owns
-all other spot and all short positions. Physical balances must reconcile to the
-ledger before new risk is permitted. SQLite commits precede every submission.
+The intended ownership model supports arbitrary independent strategies. A future
+position table will record strategy, symbol, position (quantity), and price.
+Allocation, reservations and reconciliation will use those strategy-owned records.
+
+TEMPORARY: this implementation uses a version-1 JSON snapshot with hardcoded MM
+and RXM books, name-based execution policies, and an RXM-specific bootstrap. These
+are transitional integration choices; they must not define ownership for future
+strategies. The general ledger and its migration are deferred; see the deferred
+position-ownership section in docs/MARKET_MAKING.md.
+
+Shared invariants remain: one coordinator owns the transport, physical balances
+reconcile before new risk is permitted, and SQLite commits precede submissions.
 """
 from __future__ import annotations
 
@@ -45,6 +54,13 @@ class AccountLock:
 
 
 class PortfolioStore:
+    """Persist the temporary version-1 snapshot and durable order/event journals.
+
+    TODO (deferred ledger build): replace the strategy-specific position state
+    with strategy/symbol/position/price records. Migrate existing ownership and
+    accounting explicitly, preserving pending reservations and order history.
+    """
+
     def __init__(self, path, clock):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
@@ -132,6 +148,8 @@ def canonical(value, precision):
 
 
 class AccountCoordinator:
+    """Coordinate one account through the temporary MM/RXM ownership adapter."""
+
     def __init__(self, port, store, config, fees, clock, *, dry_run=False, import_order_ids=(), paused=lambda strategy: False):
         self.port, self.store, self.config, self.fees, self.clock = port, store, config, fees, clock
         self.dry_run = dry_run
@@ -152,6 +170,7 @@ class AccountCoordinator:
         return self.state["orders"]
 
     def owner(self, coin):
+        """Temporary MM-book lookup; this is not general position ownership."""
         return self.state["mm"][coin]
 
     def active(self, strategy=None):
@@ -173,6 +192,9 @@ class AccountCoordinator:
         return free + pending + sum(float(p["Collateral"]) for p in self.shorts["Positions"])
 
     def _bootstrap(self):
+        # Temporary legacy import: the current integration attributes existing
+        # holdings to RXM. The future ledger must import explicit strategy owners
+        # instead of treating RXM as the owner of every remaining position.
         unknown = [r["OrderID"] for r in self.pending if str(r["OrderID"]) not in self.import_order_ids]
         if unknown:
             raise AccountBlocked(f"unknown pending order ownership: {unknown}; import the RXM journal first")
@@ -572,7 +594,7 @@ class AccountCoordinator:
 
 
 class StrategyAccountPort:
-    """Exchange-shaped RXM view; all MM short endpoints are unconditionally denied."""
+    """Temporary MM/RXM transport views and strategy-specific order restrictions."""
     def __init__(self, account, strategy):
         self.account, self.strategy = account, strategy
         self.is_live = bool(getattr(account.port, "is_live", False))
