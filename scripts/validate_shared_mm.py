@@ -1,4 +1,12 @@
-"""Build 15m RXM replay inputs from verified cached seconds, then replay both strategies.
+"""Validate one account hosting independent MM and RXM strategy runtimes.
+
+This integration check uses the profile that enables both strategies, each with
+its own decisions, execution path and allocated capital. It prepares RXM's 15m
+history from verified cached seconds; MM consumes its own one-second history.
+The shared account must keep their cash, inventory and order reservations separate.
+
+For a single-strategy replay, use `tradebot replay --strategies rxm` or
+`tradebot replay --strategies mm-10m-fluctuation` with the market-making config.
 
 Run with PYTHONPATH=src python3 scripts/validate_shared_mm.py --cache ... --out ...
 No downloads and no live exchange access. Results and derived candles stay under --out.
