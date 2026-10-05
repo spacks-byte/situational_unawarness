@@ -343,3 +343,33 @@ def test_rate_limit_wait_precedes_final_quote_checks(tmp_path):
     o, = prepare(a, clock)
     assert a.submit(o)["Success"]
     assert a.port.peak <= 2
+
+
+def test_near_flat_large_lots_reconcile_without_rewriting_cash_or_positions(tmp_path):
+    a, sim, clock = setup_account(tmp_path)
+    lot = 815068493.1506848
+    quantity = 0.
+    for _ in range(7):
+        quantity += lot
+    for _ in range(7):
+        quantity -= lot
+    assert quantity == 9.5367431640625e-7  # The 28-day replay's observed residue.
+    a.owner("PEPE")["quantity"] = quantity
+    a.tickers["Data"]["PEPE/USD"]["LastPrice"] = 3.6e-6
+    before = deepcopy(a.state)
+    a._reconcile()
+    assert a.state == before
+    # A real coin discrepancy must still fail; this is not a blanket waiver for
+    # assets with small unit prices, and other strategy holdings remain separate.
+    a.state["rxm_quantity"]["PEPE"] = 1.
+    with pytest.raises(AccountBlocked, match="PEPE inventory mismatch"):
+        a._reconcile()
+
+
+@pytest.mark.parametrize("price", [0., -1., float("nan"), 100_000.])
+def test_roundoff_allowance_needs_valid_price_and_negligible_value(tmp_path, price):
+    a, sim, clock = setup_account(tmp_path)
+    a.owner("PEPE")["quantity"] = 9.5367431640625e-7
+    a.tickers["Data"]["PEPE/USD"]["LastPrice"] = price
+    with pytest.raises(AccountBlocked, match="PEPE inventory mismatch"):
+        a._reconcile()

@@ -325,8 +325,15 @@ class AccountCoordinator:
             if b["cash"] < -1e-7 or b["quantity"] < -1e-7:
                 raise AccountBlocked("insolvent MM book")
         for c in set(expected) | (set(wallet)-{"USD"}):
-            if not math.isclose(total_quantity(wallet, c), expected.get(c, 0), rel_tol=1e-9, abs_tol=1e-7):
-                raise AccountBlocked(f"unexplained {c} inventory mismatch")
+            actual, ledger = total_quantity(wallet, c), expected.get(c, 0)
+            # Adding/subtracting billion-unit meme-coin lots can leave a few
+            # micro-units when a book returns to flat. The unit-only tolerance
+            # becomes too strict there. Permit at most 1e-8 USD of additional
+            # roundoff, without changing cash, quantities or position ownership.
+            price = float(self.tickers.get("Data", {}).get(to_pair(c), {}).get("LastPrice", 0))
+            negligible = math.isfinite(price) and price > 0 and abs(actual-ledger)*price <= 1e-8
+            if not math.isclose(actual, ledger, rel_tol=1e-9, abs_tol=1e-7) and not negligible:
+                raise AccountBlocked(f"unexplained {c} inventory mismatch: actual {actual!r}, ledger {ledger!r}")
         actual_shorts = {p["Pair"]: float(p["ShortQty"]) for p in self.shorts["Positions"]}
         for pair in set(actual_shorts) | set(self.state["short_quantity"]):
             if not math.isclose(actual_shorts.get(pair, 0), self.state["short_quantity"].get(pair, 0), rel_tol=1e-8, abs_tol=1e-7):
