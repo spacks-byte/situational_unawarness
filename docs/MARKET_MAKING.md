@@ -229,7 +229,7 @@ The reproducible validation script can derive RXM 15-minute OHLCV from the same
 verified one-second cache before running the actual coordinator:
 
 ```bash
-PYTHONPATH=src python3 scripts/validate_shared_mm.py \
+PYTHONPATH=src python3 scripts/validate_account_integration.py \
   --cache ../shared-backtest/data --out results/shared-validation
 
 PYTHONPATH=src python3 scripts/validate_mm_policy.py \

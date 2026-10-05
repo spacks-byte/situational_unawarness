@@ -8,7 +8,7 @@ The shared account must keep their cash, inventory and order reservations separa
 For a single-strategy replay, use `tradebot replay --strategies rxm` or
 `tradebot replay --strategies mm-10m-fluctuation` with the market-making config.
 
-Run with PYTHONPATH=src python3 scripts/validate_shared_mm.py --cache ... --out ...
+Run with PYTHONPATH=src python3 scripts/validate_account_integration.py --cache ... --out ...
 No downloads and no live exchange access. Results and derived candles stay under --out.
 """
 import argparse
