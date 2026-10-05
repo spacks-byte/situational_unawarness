@@ -91,6 +91,7 @@ Only overrides of `config/default.yaml` are listed there. The reasons for each v
 | `execution.min_cash_reserve_usd` | 500 | **200** | Together with the 0.98 gross cap |
 | `live.guard.max_symbol_weight` | 0.40 | **0.60** | Same cap as the engine. **The default would block RXM's own rebalances.** |
 | `live.guard.max_order_frac_equity` | 0.40 | **0.51** | Child orders are at most 0.5 of equity |
+| `live.escalate`, `ladder_bps`, `cross_bps` | off | **on, [5, 0], 10** | A symbol still off target steps up each 15m bar: 5 bp passive, at the last price, then it crosses (limits 10 bp through; short opens at market). The book is complete within about 45 minutes even if passive limits never fill. |
 
 ## 4. API budget (limit: 30 requests/min)
 
@@ -130,8 +131,23 @@ A daily rebalance (6–10 orders) is spread over about a minute by `ThrottledPor
 
 1. **Short closes are market orders** (0.1%). Roostoo's `short_close` takes no price.
 2. **Partial short trims** are sized at the current price rather than the entry price, which is slightly off once the price has moved. Full exits use `close_pct=100` and are exact.
-3. **The risk manager rejects a whole plan** when any limit is broken, which is why the limits above are wide.
-4. **Equity during resting orders** is correct only if Roostoo reports locked USD in `Lock`. Verify on the test account.
+3. **The risk manager rejects a whole plan** when any limit is broken, which is why the limits above are wide. Cash is the exception: opens are scaled to the cash that exists (cash + close proceeds - reserve), so profit on open shorts can no longer freeze a rebalance.
+4. **USD `Lock`** holds resting orders and the collateral of open shorts. The snapshot works out which part is collateral (already counted as the short position) and reports any remainder as `lock_unexplained_usd`. The lock-in never triggers while that remainder is above 1% of equity.
 5. **Universe:** the 35 backtest coins. A coin missing from Roostoo's ticker is skipped and its weight is not redistributed.
 6. **Lock-in timing:** live uses mark-to-market snapshot equity confirmed on 2 polls; the backtest uses the previous bar's close and a single check.
 7. **No deployment files yet** (systemd unit, setup script). See docs/REVIEW.md.
+
+## 8. Incident, Oct 4: false lock-in (and how to undo it)
+
+**What happened.** Roostoo keeps the collateral of open shorts in `USD.Lock`. The snapshot added `Free + Lock` as cash and then the collateral again as the short position, so equity read about $134k on a $100k account. That passed the +6% lock-in on two polls, and every weight was scaled x0.3 for good (`"locked": true` in `strategy_state.json`). The book sat at about 35-41% of target.
+
+**Signs.** `status.json` shows `locked: true` and `equity_usd` above the Roostoo UI by the short collateral. `bot.log` has `LOCK-IN: return 3x%`. Signal ids end in `-L`.
+
+**Recovery (in this order).** The old code re-locks within two polls, so the code goes first.
+
+1. Stop the bot (Ctrl+C in tmux; wait for `stopped after N loops`).
+2. `git pull` to a version with the snapshot fix.
+3. `python scripts/unlock_state.py --state-dir var/live_comp` (check only), then again with `--apply`. It backs up the file, sets `locked: false` and keeps `start_equity`. It refuses if the bot looks alive or `start_equity` is not about 100k.
+4. Start the bot with the same command and the same `--state-dir`.
+
+Do not delete `strategy_state.json` or `engine_state.db`. The next 15-minute re-quote rebuilds the book to full size.

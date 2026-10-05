@@ -16,9 +16,10 @@ sent (the strategy re-quotes it at the next 15m bar).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
-from tradebot.core.symbols import to_pair
+from tradebot.core.symbols import to_coin, to_pair
 
 log = logging.getLogger(__name__)
 
@@ -26,10 +27,15 @@ log = logging.getLogger(__name__)
 class RepegPort:
     is_live = False
 
-    def __init__(self, port: Any, offset_bps: float, max_move: float = 0.03) -> None:
+    def __init__(self, port: Any, offset_bps: float, max_move: float = 0.03,
+                 reference: Callable[[], dict[str, float] | None] | None = None) -> None:
         self._port = port
         self.offset = offset_bps / 1e4
         self.max_move = max_move
+        # reference(): {coin: price the order was priced from} (the loop's snapshot). With it, each
+        # order keeps ITS OWN offset (passive 5 bp, at the touch, or crossing on the escalation
+        # ladder); without it every limit is re-pegged to the fixed `offset` on its passive side.
+        self._reference = reference
         self.is_live = bool(getattr(port, "is_live", False))
         self.repegged = 0
         self.skipped = 0
@@ -43,13 +49,15 @@ class RepegPort:
             last = float(self._port.get_ticker(pair).get("Data", {}).get(pair, {}).get("LastPrice") or 0.0)
         except Exception:
             last = 0.0
-        stale_ref = stale_limit / (1 + sign * self.offset)
+        ref = float(((self._reference() if self._reference else None) or {}).get(to_coin(pair), 0.0) or 0.0)
+        rel = stale_limit / ref - 1 if ref > 0 else sign * self.offset
+        stale_ref = ref if ref > 0 else stale_limit / (1 + sign * self.offset)
         if last <= 0 or abs(last / stale_ref - 1) > self.max_move:
             self.skipped += 1
             log.warning("re-peg %s: fresh price %s vs %.8g used by the strategy; order not sent", pair, last, stale_ref)
             return None
         self.repegged += 1
-        return last * (1 + sign * self.offset)
+        return last * (1 + rel)
 
     def place_order(self, pair_or_coin, side, quantity, price=None, order_type=None):
         limit = price is not None and (order_type or "LIMIT").upper() == "LIMIT"

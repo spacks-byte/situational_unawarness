@@ -24,6 +24,9 @@ live:
   strategy: rxm
   mode: comp
   state_dir: var/live_comp         # one directory per account + mode; never reuse a dry-run directory
+  escalate: true                   # off-target symbols: 5 bp passive, then at the last price, then cross
+  ladder_bps: [5.0, 0.0]           # (buys/sells +-10 bp marketable, short opens market): book complete
+  cross_bps: 10.0                  # ~33 min after the rebalance even if passive limits never fill
   guard:
     max_symbol_weight: 0.60        # same cap as the engine (default 0.40 would block RXM's own rebalances)
     warn_symbol_weight: 0.50

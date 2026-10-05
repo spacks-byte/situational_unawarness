@@ -56,6 +56,7 @@ execution:
   equity_snapshot_interval_seconds: 300
   heart_beat_interval_seconds: 60
   pending_short_ttl_seconds: 900
+  cancel_settle_seconds: 2.0         # after cancelling stale orders, wait before reading the account
 
 backtest:
   initial_cash: 100000.0
@@ -100,6 +101,9 @@ live:
   max_http_per_minute: 25
   repeg: true
   repeg_max_move: 0.03
+  escalate: false                    # off-target symbols step up: ladder_bps passive, then cross
+  ladder_bps: null                   # null = [strategy offset, 0]
+  cross_bps: 10.0                    # last step: buys/sells this far through the last price, short opens at market
   kill_file: KILL
   heartbeat_minutes: 15
   max_backoff_seconds: 900

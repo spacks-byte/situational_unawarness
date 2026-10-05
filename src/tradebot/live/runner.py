@@ -39,7 +39,8 @@ from tradebot.core.config import Settings
 from tradebot.core.symbols import to_coin
 from tradebot.engine import Engine
 from tradebot.live.bridge import CompetitionStrategy, LiveStrategy, SnapshotRejected, rxm_spec
-from tradebot.live.guard import Guard, GuardConfig, ProposedOrder, Status, check_kill_switch
+from tradebot.engine.state.snapshot import remaining_qty
+from tradebot.live.guard import Guard, GuardConfig, ProposedOrder, Status, check_kill_switch, project_snapshot
 from tradebot.live.market_data import BarBuffer, FetchFn, binance_public_fetch
 from tradebot.live.repeg import RepegPort
 from tradebot.live.throttle import ThrottledPort
@@ -124,12 +125,29 @@ def plan_orders(plan: dict[str, Any], prices: dict[str, float]) -> list[Proposed
     return orders
 
 
+def resting_orders(pending: list[dict[str, Any]] | None, prices: dict[str, float]) -> list[ProposedOrder]:
+    """Resting opens/sells (unfilled part) as guard orders, so portfolio checks see the book they make."""
+    sides = {"BUY": "BUY", "SELL": "SELL", "SHORT_OPEN": "SHORT"}
+    out = []
+    for order in pending or []:
+        side = sides.get(str(order.get("Side", "")).upper())
+        if side is None or str(order.get("Status", "PENDING")).upper() != "PENDING":
+            continue
+        coin = to_coin(str(order.get("Pair", "")))
+        price = float(order.get("Price") or prices.get(coin, 0.0) or 0.0)
+        qty = remaining_qty(order)
+        if coin and price > 0 and qty > 0:
+            out.append(ProposedOrder(coin, side, qty, price, "LIMIT"))
+    return out
+
+
 def build_live_strategy(settings: Settings, buffer: BarBuffer, state_path: Path, clock: Clock) -> LiveStrategy:
     cfg = settings.live
     common = dict(state_path=state_path, clock=clock, band=cfg.band, gross_cap=cfg.gross_cap,
                   stale_after=pd.Timedelta(hours=cfg.stale_after_hours), lock_confirmations=cfg.lock_confirmations,
                   min_trade_usd=cfg.min_trade_usd, max_equity_jump=cfg.max_equity_jump,
-                  bar_grace=pd.Timedelta(minutes=cfg.bar_grace_minutes))
+                  bar_grace=pd.Timedelta(minutes=cfg.bar_grace_minutes), escalate=cfg.escalate,
+                  ladder_bps=cfg.ladder_bps, cross_bps=cfg.cross_bps)
     if cfg.strategy == "rxm":
         return CompetitionStrategy(buffer, mode=cfg.mode, **common)
     if cfg.strategy not in STRATEGIES:
@@ -224,7 +242,8 @@ class LiveRunner:
 
         self.throttled = ThrottledPort(port, self.clock, max_per_minute=cfg.max_http_per_minute)
         self.guarded = GuardedPort(self.throttled, self.guard, lambda: self.last_snapshot, lambda: self._price_times)
-        engine_port = RepegPort(self.guarded, self.strategy.offset * 1e4, cfg.repeg_max_move) if cfg.repeg \
+        engine_port = RepegPort(self.guarded, self.strategy.offset * 1e4, cfg.repeg_max_move,
+                                reference=lambda: (self.last_snapshot or {}).get("prices")) if cfg.repeg \
             else self.guarded
         self.engine = Engine(engine_port, config=execution, clock=self.clock,
                              state_path=self.state_dir / "engine_state.db",
@@ -289,10 +308,15 @@ class LiveRunner:
 
     def plan_guard(self, plan: dict[str, Any], actual: dict[str, Any], equity: float) -> list[str]:
         """Portfolio-level guard checks on the whole plan before anything is sent ([] = allowed)."""
-        orders = plan_orders(plan, actual.get("prices") or {})
+        prices = actual.get("prices") or {}
+        orders = plan_orders(plan, prices)
         if not orders:
             return []
-        report = self.guard.pre_trade(actual, orders, price_times=self._price_times)
+        # The plan already nets out resting orders, so judge it from the book they will make: a long
+        # top-up while the short opens still rest is not a +0.64 net book (guard net_max 0.60)
+        resting = resting_orders(actual.get("pending_orders"), prices)
+        base = project_snapshot(actual, resting, self.guard.config) if resting else actual
+        report = self.guard.pre_trade(base, orders, price_times=self._price_times)
         blocks = [r for r in report.blocks if r.name not in ORDER_CHECKS or r.name == "kill_switch"]
         if blocks:
             log.error("guard rejected the plan: %s", "; ".join(f"{r.name}: {r.message}" for r in blocks))
