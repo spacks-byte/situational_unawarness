@@ -142,6 +142,7 @@ class DataConfig(_Section):
 class LiveConfig(_Section):
     """The unattended runner (`python -m tradebot live`) and the live candle bridge."""
 
+    strategies: list[str] = Field(default_factory=list)  # explicit account roster; empty uses legacy strategy
     strategy: str = "rxm"                 # registry name; rxm runs through its frozen presets
     mode: str = "comp"                    # rxm preset (comp | neutral); never change it mid-event
     params: dict[str, Any] = Field(default_factory=dict)   # strategy params for non-preset strategies
@@ -149,6 +150,7 @@ class LiveConfig(_Section):
     state_dir: str = "var/live"           # engine journal, audit log, strategy state, status, bot.log
     # Candles
     klines_url: str = "https://data-api.binance.vision"
+    market_stream_url: str = "wss://stream.binance.com:9443/stream"
     buffer_days: int = 50                 # >= 45: 30-day beta + 14-day lookback
     bar_grace_minutes: int = 30           # wait this long for a late decision bar before going without it
     stale_after_hours: float = 2.0        # no new candle for this long: hold the book
@@ -175,6 +177,41 @@ class LiveConfig(_Section):
     guard: dict[str, Any] = Field(default_factory=dict)     # tradebot.live.guard.GuardConfig overrides
 
 
+class CapitalAllocation(_Section):
+    """Fractions of reconciled equity at first initialization; persisted thereafter."""
+    mm_fraction: float = Field(default=0.70, gt=0, lt=1, allow_inf_nan=False)
+
+    @property
+    def rxm_fraction(self) -> float:
+        return 1.0 - self.mm_fraction
+
+
+class MarketMakingConfig(_Section):
+    enabled: bool = False
+    capital: CapitalAllocation = Field(default_factory=CapitalAllocation)
+    # Allocation and mechanics are the selected, frozen PoC preset.
+    allocations: dict[str, float] = Field(default_factory=lambda: {
+        "PEPE": 0.85, "BONK": 0.075, "1000CHEEMS": 0.075})
+    refresh_seconds: int = Field(default=600, ge=600)
+    warmup_seconds: int = Field(default=3600, ge=3600)
+    feature_lag_seconds: int = Field(default=1, ge=1)
+    lot_fraction: float = Field(default=0.05, gt=0, le=1)
+    inventory_fraction: float = Field(default=0.70, gt=0, le=1)
+    # Existing RXM state is read only during first bootstrap, never guessed from the wallet.
+    rxm_state_dir: str = "var/live_comp"
+    replay_cache_dir: str = "data/mm-1s"
+    account_lock: str = "var/roostoo-account.lock"
+
+    @model_validator(mode="after")
+    def validate_allocations(self):
+        import math
+        if set(self.allocations) != {"PEPE", "BONK", "1000CHEEMS"} or any(
+            not math.isfinite(v) or v <= 0 for v in self.allocations.values()
+        ) or not math.isclose(sum(self.allocations.values()), 1.0, abs_tol=1e-12):
+            raise ValueError("MM allocations must be positive PEPE/BONK/1000CHEEMS fractions summing to one")
+        return self
+
+
 class Settings(_Section):
     fees: FeeSchedule = Field(default_factory=FeeSchedule)
     exchange: ExchangeSettings = Field(default_factory=ExchangeSettings)
@@ -182,6 +219,7 @@ class Settings(_Section):
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     live: LiveConfig = Field(default_factory=LiveConfig)
+    market_making: MarketMakingConfig = Field(default_factory=MarketMakingConfig)
 
     @model_validator(mode="after")
     def _share_fees(self) -> "Settings":

@@ -27,7 +27,9 @@ class ReplayExchangePort:
     is_live = False
 
     def __init__(self, bars: dict[str, pd.DataFrame], clock: Clock, initial_usd: float = 100_000.0,
-                 fees: FeeSchedule | None = None) -> None:
+                 fees: FeeSchedule | None = None, intervals: dict[str, str] | None = None) -> None:
+        self.intervals = {to_pair(c): v for c, v in (intervals or {}).items()}
+        self._synced_pairs = {}
         self.clock = clock
         self.fees = fees or FeeSchedule()
         self.bars = {to_pair(s): df.sort_index() for s, df in bars.items()}
@@ -46,11 +48,12 @@ class ReplayExchangePort:
     def _now(self) -> pd.Timestamp:
         return pd.Timestamp(self.clock.now()).tz_convert("UTC")
 
-    def _last_closed(self) -> pd.Timestamp:
-        return self._now().floor("15min") - BAR
+    def _last_closed(self, pair=None) -> pd.Timestamp:
+        interval = self.intervals.get(pair, "15min")
+        return self._now().floor(interval) - pd.Timedelta(interval)
 
     def last_price(self, pair: str) -> float:
-        key = (pair, self._last_closed())
+        key = (pair, self._last_closed(pair))
         if key not in self._px_cache:
             if len(self._px_cache) > 10_000:
                 self._px_cache.clear()
@@ -61,35 +64,50 @@ class ReplayExchangePort:
 
     def _sync(self) -> None:
         """Match resting orders against every bar completed since the last sync."""
-        last = self._last_closed()
-        if self._synced_to is not None and last <= self._synced_to:
+        now = self._now()
+        if self._synced_to is not None and now <= self._synced_to:
             return
-        start = self._synced_to + BAR if self._synced_to is not None else last
-        self._synced_to = last
         for order in list(self.orders):
-            df = self.bars.get(order["Pair"])
+            pair = order["Pair"]
+            interval = self.intervals.get(pair, "15min")
+            bar_size = pd.Timedelta(interval)
+            last = self._last_closed(pair)
+            previous = self._synced_pairs.get(pair)
+            start = previous+bar_size if previous is not None else last
+            df = self.bars.get(pair)
             if df is None:
                 continue
             placed = pd.Timestamp(order["CreateTimestamp"], unit="ms", tz="UTC")
-            # bars that end after the order was placed (the bar it was placed in counts)
-            window = df.loc[max(start, placed.floor("15min")): last]
+            first = placed.ceil(interval) if interval == "1s" else placed.floor(interval)
+            window = df.loc[max(start, first):last]
+            if interval == "1s" and len(window):
+                # Zero-adverse PoC: trade-containing candle touches, no penetration.
+                prices = window["low"] if order["Side"] == "BUY" else window["high"]
+                touches = prices <= order["Price"] if order["Side"] == "BUY" else prices >= order["Price"]
+                volume = window["volume"] if "volume" in window else pd.Series(1., index=window.index)
+                window = window[touches & (window["trades"] > 0) & (volume > 0)].head(1)
             for ts, bar in window.iterrows():
                 if self._try_fill(order, bar, ts):
                     break
+        self._synced_to = now
+        self._synced_pairs = {pair: self._last_closed(pair) for pair in self.bars}
 
     def _try_fill(self, order: dict[str, Any], bar: pd.Series, ts: pd.Timestamp) -> bool:
         px = order["Price"]
         side = order["Side"]
-        if side == "BUY" and bar["low"] < px:
+        touch = self.intervals.get(order["Pair"]) == "1s"
+        if side == "BUY" and (bar["low"] <= px if touch else bar["low"] < px):
             base = to_coin(order["Pair"])
             self.coins[base] = self.coins.get(base, 0.0) + order["Quantity"]
             self.free_usd -= order["Quantity"] * px * self.fees.spot_maker
-        elif side == "SELL" and bar["high"] > px:
+        elif side == "SELL" and (bar["high"] >= px if touch else bar["high"] > px):
             self.free_usd += order["Quantity"] * px * (1 - self.fees.spot_maker)
-        elif side == "SHORT_OPEN" and bar["high"] > px:
+        elif side == "SHORT_OPEN" and (bar["high"] >= px if touch else bar["high"] > px):
             self._add_short(order["Pair"], order["Collateral"], px)
         else:
             return False
+        order["FinishTimestamp"] = int((ts+pd.Timedelta(self.intervals.get(order["Pair"], "15min"))).timestamp()*1000)
+        order["FilledQuantity"] = order["Quantity"]
         order["Status"] = "FILLED"
         order["FilledAverPrice"] = px
         self.orders.remove(order)
@@ -97,7 +115,7 @@ class ReplayExchangePort:
         return True
 
     def _fill(self, pair, side, kind, qty, price, fill_bar=None):
-        self.fills.append({"time": self._now() if fill_bar is None else fill_bar + BAR, "pair": pair, "side": side,
+        self.fills.append({"time": self._now() if fill_bar is None else fill_bar + pd.Timedelta(self.intervals.get(pair, "15min")), "pair": pair, "side": side,
                            "type": kind, "qty": qty, "price": price, "value": qty * price})
 
     def _count(self, name: str) -> None:
@@ -182,7 +200,7 @@ class ReplayExchangePort:
         self._count("cancel_order")
         cancelled = []
         for o in list(self.orders):
-            if (order_id is not None and o["OrderID"] == order_id) or (order_id is None and pair in (None, o["Pair"])):
+            if (order_id is not None and str(o["OrderID"]) == str(order_id)) or (order_id is None and pair in (None, o["Pair"])):
                 self.orders.remove(o)
                 o["Status"] = "CANCELED"
                 if o["Side"] == "BUY":
@@ -198,7 +216,7 @@ class ReplayExchangePort:
     def query_order(self, order_id=None, pair=None, pending_only=None, offset=None, limit=None):
         self._count("query_order")
         found = self.orders if pending_only else self.history
-        found = [o for o in found if (order_id is None or o["OrderID"] == order_id) and (pair is None or o["Pair"] == pair)]
+        found = [o for o in found if (order_id is None or str(o["OrderID"]) == str(order_id)) and (pair is None or o["Pair"] == pair)]
         return {"Success": True, "OrderMatched": deepcopy(found)}
 
     def list_open_orders(self):
