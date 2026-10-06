@@ -7,6 +7,7 @@ Commands:
   live       run the bot unattended on Roostoo (dry run unless --live)
   replay     simulate the live bot on downloaded candles (no network)
   dashboard  build the trading-desk dashboard (HTML)
+  account    read-only checks of the shared MM/RXM account (preflight, explain)
   api        interactive Roostoo API test menu
 """
 from __future__ import annotations
@@ -120,6 +121,32 @@ def _dashboard_command(args, settings: Settings) -> int:
     return dashboard_main(args.dashboard_args)
 
 
+def _account_command(args, settings: Settings) -> int:
+    import json
+
+    from tradebot.live import preflight as checks
+
+    if args.state_dir:
+        settings.live.state_dir = args.state_dir
+    if args.action == "explain":
+        print(json.dumps(checks.explain(settings.live.state_dir, events=args.events), indent=2, default=str))
+        return 0
+    if not settings.market_making.enabled:
+        print("[ERROR] preflight checks the shared account: pass --config config/market-making.yaml", file=sys.stderr)
+        return 2
+    from tradebot.exchange import RoostooClient, RoostooExchangePort
+    from tradebot.live.runner import account_lock_path
+
+    client = RoostooClient(settings=settings.exchange)
+    if not client.api_key or not client.api_secret:
+        print("[ERROR] Roostoo credentials missing", file=sys.stderr)
+        return 2
+    port = RoostooExchangePort(client)
+    report = checks.preflight(settings, port, lock_path=account_lock_path(settings, port))
+    print(json.dumps(report, indent=2, default=str) if args.json else checks.render(report))
+    return 0 if report["ready"] else 1
+
+
 def _api_command(args, settings: Settings) -> int:
     from tradebot.exchange.manual import run_menu
 
@@ -170,6 +197,14 @@ def build_parser() -> argparse.ArgumentParser:
                           add_help=False)
     dash.add_argument("dashboard_args", nargs=argparse.REMAINDER)
     dash.set_defaults(handler=_dashboard_command)
+
+    account = sub.add_parser("account", help="Read-only checks of the shared MM/RXM account (no orders)")
+    account.add_argument("action", choices=["preflight", "explain"],
+                         help="preflight: venue + local state before a takeover; explain: current restrictions from portfolio.db")
+    account.add_argument("--state-dir", help="Shared account state dir (default: live.state_dir)")
+    account.add_argument("--json", action="store_true", help="preflight: print the full JSON report")
+    account.add_argument("--events", type=int, default=20, help="explain: recent journal events to show")
+    account.set_defaults(handler=_account_command)
 
     api = sub.add_parser("api", help="Interactive Roostoo API test menu")
     api.set_defaults(handler=_api_command)

@@ -141,6 +141,16 @@ def resting_orders(pending: list[dict[str, Any]] | None, prices: dict[str, float
     return out
 
 
+def account_lock_path(settings: Settings, port: Any) -> Path:
+    """The account's lock file: configured path, else keyed to the client's base URL + API key."""
+    from tradebot.core.locking import resolve_lock_path
+
+    client = getattr(port, "client", None)
+    base_url = getattr(client, "base_url", None) or settings.exchange.base_url
+    api_key = getattr(client, "api_key", None) or os.environ.get("ROOSTOO_API_KEY")
+    return resolve_lock_path(settings.market_making.account_lock, base_url, api_key)
+
+
 def build_live_strategy(settings: Settings, buffer: BarBuffer, state_path: Path, clock: Clock) -> LiveStrategy:
     cfg = settings.live
     common = dict(state_path=state_path, clock=clock, band=cfg.band, gross_cap=cfg.gross_cap,
@@ -237,8 +247,9 @@ class LiveRunner:
 
         self.account_lock = None
         if not shared_account and getattr(port, "is_live", False):
+            # Same per-account lock as the shared coordinator: never two bots on one account
             from tradebot.engine.state.portfolio import AccountLock
-            self.account_lock = AccountLock(settings.market_making.account_lock)
+            self.account_lock = AccountLock(account_lock_path(settings, port), state_dir=self.state_dir)
 
         self.buffer = BarBuffer(_universe(settings), fetch or binance_public_fetch(cfg.klines_url),
                                 window_days=cfg.buffer_days)

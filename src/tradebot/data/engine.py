@@ -19,6 +19,19 @@ from tradebot.core.symbols import to_binance, to_coin
 from tradebot.data.market import _empty
 
 log = logging.getLogger(__name__)
+
+
+def tls_options():
+    """Certificate bundle for the WebSocket handshake. Verification stays on; certifi only supplies
+    the CA store that a bare Windows/Python install often lacks ("unable to get local issuer")."""
+    try:
+        import certifi
+    except ImportError:          # the system store is used, still verified
+        return {}
+    import ssl
+    return {"cert_reqs": ssl.CERT_REQUIRED, "ca_certs": certifi.where()}
+
+
 INTERVALS = {"1s": pd.Timedelta(seconds=1), "15m": pd.Timedelta(minutes=15)}
 
 
@@ -27,7 +40,11 @@ class MarketDataEngine:
         """windows maps (coin, interval) to retained seconds, with no strategy names.
 
         stream_url=None selects deterministic local-history replay. Live mode uses
-        sources for bootstrap/gap repair only, and WebSocket streams for updates.
+        sources for bootstrap/gap repair, and WebSocket streams for updates. stream_url
+        may be a list: the producer moves to the next endpoint after a failed connection.
+        Only coins with a one-second window get one-second klines and book tickers;
+        coarse-only consumers (RXM) receive closed candles from the stream when it is up
+        and from the REST repair pass (every 30 s) otherwise, so they never depend on it.
         """
         self.clock, self.sources = clock, dict(sources)
         self.windows = {(to_coin(c), interval): seconds for (c, interval), seconds in windows.items()}
@@ -35,12 +52,11 @@ class MarketDataEngine:
                for (_, i), seconds in self.windows.items()):
             raise ValueError("invalid candle interval or retention")
         self.symbols = sorted({c for c, _ in self.windows})
-        if stream_url:
-            # Every subscribed instrument has second-level observations, even if
-            # its current consumers request only a coarser historical window.
-            for coin in self.symbols:
-                self.windows.setdefault((coin, "1s"), 120)
-        self.stream_url, self.websocket_factory = stream_url, websocket_factory
+        self.quoted = sorted({c for c, i in self.windows if i == "1s"})
+        urls = [stream_url] if isinstance(stream_url, str) else list(stream_url or [])
+        self.stream_urls = [u for u in urls if u]
+        self.stream_url = self.stream_urls[0] if self.stream_urls else None
+        self.websocket_factory = websocket_factory
         self.frames = {}
         self.books = {}
         self.errors = {}
@@ -183,7 +199,7 @@ class MarketDataEngine:
             return
         ts = pd.Timestamp(int(candle["t"]), unit="ms", tz="UTC")
         interval = candle["i"]
-        if interval != "1s" and (coin, interval) not in self.windows:
+        if (coin, interval) not in self.windows:
             return
         data = pd.DataFrame({"open": [float(candle["o"])], "high": [float(candle["h"])],
                              "low": [float(candle["l"])], "close": [float(candle["c"])],
@@ -196,7 +212,7 @@ class MarketDataEngine:
         now = pd.Timestamp(self.clock.now()).floor("s")
         quotes = {}
         with self._lock:
-            for coin in self.symbols:
+            for coin in self.quoted:
                 quote = deepcopy(self.books.get(coin, {}))
                 frame = self.frames.get((coin, "1s"))
                 if frame is not None and len(frame):
@@ -224,7 +240,8 @@ class MarketDataEngine:
 
     def status(self):
         with self._lock:
-            return {"connected": self.connected, "stream_error": self.stream_error, "published_at": self.published["timestamp"],
+            return {"connected": self.connected, "stream_url": self.stream_url, "stream_error": self.stream_error,
+                    "published_at": self.published["timestamp"],
                     "symbols": self.symbols, "errors": {f"{c}/{i}": e for (c, i), e in self.errors.items()},
                     "gaps": [f"{c}/{i}" for c, i in sorted(self.gaps)]}
 
@@ -232,10 +249,11 @@ class MarketDataEngine:
         streams = []
         for coin in self.symbols:
             symbol = to_binance(coin).lower()
-            streams.extend([f"{symbol}@kline_1s", f"{symbol}@bookTicker"])
+            if (coin, "1s") in self.windows:
+                streams.extend([f"{symbol}@kline_1s", f"{symbol}@bookTicker"])
             if (coin, "15m") in self.windows:
                 streams.append(f"{symbol}@kline_15m")
-        url = self.stream_url+"?streams="+"/".join(streams)
+        endpoint = 0
         def opened(_):
             self.stream_error = None
             self.connected = True
@@ -249,14 +267,20 @@ class MarketDataEngine:
             except Exception:
                 log.exception("invalid market-data event")
         while not self._stop.is_set():
+            self.stream_url = self.stream_urls[endpoint % len(self.stream_urls)]
+            url = self.stream_url+"?streams="+"/".join(streams)
+            was_connected = False
             try:
                 self._socket = self.websocket_factory(url, on_open=opened, on_message=received, on_error=failed)
-                self._socket.run_forever(ping_interval=20, ping_timeout=10, http_proxy_timeout=10)
+                self._socket.run_forever(ping_interval=20, ping_timeout=10, http_proxy_timeout=10,
+                                         sslopt=tls_options())
             except Exception as exc:
                 failed(self._socket, exc)
                 log.exception("market-data stream disconnected")
             finally:
-                self.connected = False
+                was_connected, self.connected = self.connected, False
+            if not was_connected:
+                endpoint += 1            # never connected here: try the next endpoint
             self._stop.wait(2)
 
     def _publish_loop(self):

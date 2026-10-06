@@ -151,6 +151,8 @@ class LiveConfig(_Section):
     # Candles
     klines_url: str = "https://data-api.binance.vision"
     market_stream_url: str = "wss://stream.binance.com:9443/stream"
+    # Tried in order after a failed connection (market-data-only Binance endpoint, same events)
+    market_stream_fallback_urls: list[str] = ["wss://data-stream.binance.vision/stream"]
     buffer_days: int = 50                 # >= 45: 30-day beta + 14-day lookback
     bar_grace_minutes: int = 30           # wait this long for a late decision bar before going without it
     stale_after_hours: float = 2.0        # no new candle for this long: hold the book
@@ -197,10 +199,20 @@ class MarketMakingConfig(_Section):
     feature_lag_seconds: int = Field(default=1, ge=1)
     lot_fraction: float = Field(default=0.05, gt=0, le=1)
     inventory_fraction: float = Field(default=0.70, gt=0, le=1)
+    # Reconciliation (docs/MARKET_MAKING.md "Reconciliation without a global halt").
+    # Cash differences up to cash_tolerance_bps of the notional filled in a sync (min floor) are fee/
+    # proceeds rounding: absorbed and journaled. Larger ones restrict only the traced scope.
+    cash_tolerance_bps: float = Field(default=3.0, ge=0, le=30)
+    cash_tolerance_floor_usd: float = Field(default=0.05, ge=0)
+    restriction_clear_syncs: int = Field(default=2, ge=1)   # clean syncs before a restriction lifts
+    evidence_window_seconds: float = Field(default=30.0, gt=0)  # lost-response matching window
+    cancel_retry_seconds: float = Field(default=30.0, gt=0)     # re-send an unconfirmed cancel after this
     # Existing RXM state is read only during first bootstrap, never guessed from the wallet.
     rxm_state_dir: str = "var/live_comp"
     replay_cache_dir: str = "data/mm-1s"
-    account_lock: str = "var/roostoo-account.lock"
+    # Empty = per-account lock in the user's state dir, keyed to base URL + API key (tradebot.core.locking).
+    # Set only for tests or unusual hosts; a relative path is resolved against the start directory.
+    account_lock: str = ""
 
     @model_validator(mode="after")
     def validate_allocations(self):

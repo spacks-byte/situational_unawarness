@@ -45,4 +45,4 @@ market_making:
     BONK: 0.075
     1000CHEEMS: 0.075
   rxm_state_dir: var/live_comp
-  account_lock: var/roostoo-account.lock
+  # account_lock: left unset = per-account lock in the user state dir (shared with standalone RXM)

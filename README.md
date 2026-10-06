@@ -8,7 +8,8 @@ An optional [shared-account market-making profile](docs/MARKET_MAKING.md) alloca
 70% of current equity to the long-only `mm-10m-fluctuation` strategy and 30% to RXM.
 Each strategy is independently selectable with `--strategies`; neither requires
 the other to run. MM uses its own ledger and fixed ten-minute quotes for PEPE, BONK and
-1000CHEEMS. See the runbook for bootstrap, replay and dry-run commands.
+1000CHEEMS. Run `python -m tradebot --config config/market-making.yaml account preflight`
+(read-only) before a takeover; see the doc for migration, replay and dry-run commands.
 
 One Python package, `tradebot`, contains:
 - **Historical data:** Binance spot candles for every Roostoo pair.
@@ -72,6 +73,8 @@ docs/         strategy, operations, architecture, review
 | [DASHBOARD.md](docs/DASHBOARD.md) | The dashboard and the guard's checks |
 | [ENGINE.md](docs/ENGINE.md), [DESIGN.md](docs/DESIGN.md) | The live engine and verified Roostoo behaviour |
 | [ROOSTOO_API.md](docs/ROOSTOO_API.md) | The Roostoo client and the manual API menu |
+| [MARKET_MAKING.md](docs/MARKET_MAKING.md) | Shared MM/RXM account: allocation, reconciliation, preflight and migration |
+| [ACCOUNT_VALIDATION.md](docs/ACCOUNT_VALIDATION.md) | Real-order checks of the shared account on a separate test account |
 
 ## License
 

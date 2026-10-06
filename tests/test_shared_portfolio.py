@@ -166,19 +166,38 @@ def test_uncertain_submit_recovers_unique_order_and_never_duplicates(tmp_path):
     assert len(sim.history) == 1
 
 
-def test_unknown_order_and_unexplained_cash_block_risk(tmp_path):
+def test_unexplained_cash_and_unknown_order_restrict_only_their_scope(tmp_path):
     a, sim, clock = setup_account(tmp_path)
-    sim.free_usd += 100
-    with pytest.raises(AccountBlocked, match="cash mismatch"):
-        a.sync()
-    o, = [a._record(MM, "PEPE", "BUY", 1, 99)]
-    with pytest.raises(AccountBlocked):
-        a.submit(o)
+    sim.free_usd += 100                     # untraceable: no fills this sync
+    a.sync()
+    assert a.blocked is None
+    assert "cash mismatch" in a.report()["restrictions"]["cash:account"]["reason"]
+    assert prepare(a, clock) == []          # cash-spending quotes refused ...
+    assert a.refusal(MM, "PEPE", "SELL") is None and a.refusal("rxm", "BONK", "SELL") is None  # ... risk reduction not
+    assert not a.submit(a._record(MM, "PEPE", "BUY", 1, 99))["Success"]
+    assert not sim.history
     sim.free_usd -= 100
     a.sync()
-    sim.place_order("PEPE", "BUY", 1, price=99)
-    with pytest.raises(AccountBlocked, match="unowned"):
-        a.sync()
+    assert "cash:account" in a.report()["restrictions"]   # lifts only after consecutive clean syncs
+    a.sync()
+    assert a.report()["restrictions"] == {}
+    sim.place_order("PEPE", "BUY", 1, price=99)          # an order this coordinator did not send
+    a.sync()
+    restrictions = a.report()["restrictions"]
+    assert set(restrictions) == {"coin:PEPE"} and "unowned" in restrictions["coin:PEPE"]["reason"]
+    assert a.refusal("rxm", "PEPE", "BUY") and a.refusal(MM, "BONK", "BUY") is None
+    assert "cancel_order" not in sim.calls                # never adopted or cancelled automatically
+
+
+def test_cash_roundoff_within_tolerance_is_absorbed_and_recorded(tmp_path):
+    a, sim, clock = setup_account(tmp_path)
+    expected = a.state["expected_cash_assets"]
+    sim.free_usd += 0.03                    # below the 0.05 USD floor
+    a.sync()
+    assert a.report()["restrictions"] == {}
+    assert a.state["expected_cash_assets"] == pytest.approx(expected + 0.03)
+    assert a.report()["adjustments"]["count"] == 1
+    assert a.report()["adjustments"]["cash_rounding_usd"] == pytest.approx(0.03)
 
 
 def test_dry_run_has_no_mutating_calls_even_cancellation(tmp_path):
@@ -234,24 +253,52 @@ def test_deadline_and_pause_are_rechecked_after_ticker_wait(tmp_path):
     assert not sim.history
     sim.get_ticker = ticker
     a.state["next_refresh"] = clock.now().timestamp()+600
-    a.paused = lambda _: True
     o, = prepare(a, clock)
+    a.paused = lambda _: True               # paused between preparation and submission
     assert not a.submit(o)["Success"]
     assert not sim.history
 
 
-def test_uncertain_without_unique_history_stays_blocked(tmp_path):
+def test_uncertain_submission_restricts_its_coin_until_history_proves_no_execution(tmp_path):
     a, sim, clock = setup_account(tmp_path)
+    place = sim.place_order
     def timeout(*args, **kwargs):
         raise TimeoutError("outcome unknown")
     sim.place_order = timeout
     o, = prepare(a, clock)
+    with pytest.raises(AccountBlocked, match="uncertain submission"):
+        a.submit(o)
+    sim.place_order = place
+    for _ in range(3):                      # inside the evidence window: keep the reservation, wait
+        a.sync()
+        clock.advance(10)
+    assert a.blocked is None and len(a.active(MM)) == 1 and not sim.history
+    assert "coin:PEPE" in a.report()["restrictions"]
+    assert a.refusal(MM, "BONK", "BUY") is None
+    assert prepare(a, clock) == []          # never resubmitted while the outcome is unknown
+    clock.advance(60)
+    a.sync()                                # complete history, no such order: never executed
+    assert not a.active(MM) and o["status"] == "REJECTED"
+    a.sync()
+    assert a.report()["restrictions"] == {}
+    assert not sim.history
+
+
+def test_lost_spot_response_is_adopted_from_history_without_resubmitting(tmp_path):
+    a, sim, clock = setup_account(tmp_path)
+    place = sim.place_order
+    def lost(*args, **kwargs):
+        place(*args, **kwargs)
+        raise TimeoutError("response lost")
+    sim.place_order = lost
+    o, = prepare(a, clock)
     with pytest.raises(AccountBlocked):
         a.submit(o)
-    for _ in range(3):
-        with pytest.raises(AccountBlocked, match="exactly one"):
-            a.sync()
-    assert len(a.active(MM)) == 1 and not sim.history
+    a.sync()
+    assert o["order_id"] and o["status"] == "PENDING"
+    assert len(sim.history) == 1
+    a.sync()
+    assert a.report()["restrictions"] == {}
 
 
 def test_bootstrap_insufficient_unreserved_cash_does_not_liquidate(tmp_path):
@@ -357,13 +404,12 @@ def test_near_flat_large_lots_reconcile_without_rewriting_cash_or_positions(tmp_
     a.owner("PEPE")["quantity"] = quantity
     a.tickers["Data"]["PEPE/USD"]["LastPrice"] = 3.6e-6
     before = deepcopy(a.state)
-    a._reconcile()
+    assert a._reconcile() == []
     assert a.state == before
-    # A real coin discrepancy must still fail; this is not a blanket waiver for
+    # A real coin discrepancy must still be found; this is not a blanket waiver for
     # assets with small unit prices, and other strategy holdings remain separate.
     a.state["rxm_quantity"]["PEPE"] = 1.
-    with pytest.raises(AccountBlocked, match="PEPE inventory mismatch"):
-        a._reconcile()
+    assert [(scope, "inventory mismatch" in reason) for scope, reason, _ in a._reconcile()] == [("coin:PEPE", True)]
 
 
 @pytest.mark.parametrize("price", [0., -1., float("nan"), 100_000.])
@@ -371,5 +417,4 @@ def test_roundoff_allowance_needs_valid_price_and_negligible_value(tmp_path, pri
     a, sim, clock = setup_account(tmp_path)
     a.owner("PEPE")["quantity"] = 9.5367431640625e-7
     a.tickers["Data"]["PEPE/USD"]["LastPrice"] = price
-    with pytest.raises(AccountBlocked, match="PEPE inventory mismatch"):
-        a._reconcile()
+    assert [(scope, "inventory mismatch" in reason) for scope, reason, _ in a._reconcile()] == [("coin:PEPE", True)]

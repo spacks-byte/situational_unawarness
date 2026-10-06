@@ -16,12 +16,16 @@ from tradebot.engine.execution.quotes import QuoteExecutor
 from tradebot.engine.state.portfolio import AccountCoordinator, AccountLock, PortfolioStore, MM
 from tradebot.data.engine import MarketDataEngine
 from tradebot.data.market import binance_public_fetch
-from tradebot.live.runner import LiveRunner, _write_json, _universe
+from tradebot.live.runner import LiveRunner, _universe, _write_json, account_lock_path
 from tradebot.live.throttle import ThrottledPort
 from tradebot.strategy.library.mm_fluctuation import MMFluctuation
 from tradebot.strategy.registry import STRATEGIES
 
 log = logging.getLogger(__name__)
+
+
+class AccountReadDegraded(RuntimeError):
+    """A venue read failed this loop; the ledger and its restrictions are intact."""
 
 
 class QuoteBridge:
@@ -71,19 +75,20 @@ class AccountRunner:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         if self.state_dir.resolve() == Path(settings.market_making.rxm_state_dir).resolve():
             raise ValueError("shared state must be separate from standalone RXM state")
-        lockpath = settings.market_making.account_lock if mode != "simulate" else self.state_dir / "account.lock"
-        self.lock = AccountLock(lockpath)
+        if port is None:
+            if mode == "simulate":
+                raise ValueError("simulate requires an exchange adapter")
+            from tradebot.exchange import RoostooClient, RoostooExchangePort
+            client = RoostooClient(settings=settings.exchange)      # no network until first use
+            if not client.api_key or not client.api_secret:
+                raise ValueError("Roostoo credentials missing")
+            port = RoostooExchangePort(client)
+        # One process per account on this host, keyed to the account (not the working directory)
+        lockpath = account_lock_path(settings, port) if mode != "simulate" else self.state_dir / "account.lock"
+        self.lock = AccountLock(lockpath, state_dir=self.state_dir)
         self.store = None
         self.market_data = None
         try:
-            if port is None:
-                if mode == "simulate":
-                    raise ValueError("simulate requires an exchange adapter")
-                from tradebot.exchange import RoostooClient, RoostooExchangePort
-                client = RoostooClient(settings=settings.exchange)
-                if not client.api_key or not client.api_secret:
-                    raise ValueError("Roostoo credentials missing")
-                port = RoostooExchangePort(client)
             if mode == "live" and not getattr(port, "is_live", False):
                 raise ValueError("live requires real exchange transport")
             self.throttled = ThrottledPort(port, self.clock, max_per_minute=settings.live.max_http_per_minute)
@@ -108,10 +113,9 @@ class AccountRunner:
                 rxm_settings.live.strategy = "rxm"
                 windows.update({(coin, "15m"): settings.live.buffer_days*86400 for coin in _universe(rxm_settings)})
                 sources["15m"] = fetch or binance_public_fetch(settings.live.klines_url)
-            if isinstance(self.clock, RealClock):
-                sources.setdefault("1s", binance_public_fetch(settings.live.klines_url, interval="1s"))
+            streams = [settings.live.market_stream_url, *settings.live.market_stream_fallback_urls]
             self.market_data = MarketDataEngine(self.clock, sources, windows,
-                stream_url=settings.live.market_stream_url if isinstance(self.clock, RealClock) else None)
+                stream_url=streams if isinstance(self.clock, RealClock) else None)
             self.market_data.start()
             for name in self.strategy_names:
                 strategy_class = STRATEGIES[name]
@@ -179,12 +183,16 @@ class AccountRunner:
     def run_once(self):
         self.iterations += 1
         try:
-            self.account.sync()
+            if not self.account.sync():
+                # Venue read failed: no strategy step on stale balances this loop (new orders are refused
+                # anyway). Market data keeps running; the loop backs off and re-reads.
+                raise AccountReadDegraded(f"account read failed: {self.account.read_error}")
             if Path(self.settings.live.kill_file).exists() or (self.state_dir / "PAUSE").exists():
                 result = {"status": "PAUSED"}
             else:
                 strategy_results = {}
-                for name in self.strategy_names:
+                # RXM first: its rebalance must not queue behind a 600 s MM refresh for request budget
+                for name in sorted(self.strategy_names, key=lambda n: n != "rxm"):
                     if self.risk_paused(name):
                         if name == MM and (self.state_dir / "STOP_MM").exists():
                             self.quotes.cancel_owned()
@@ -195,6 +203,7 @@ class AccountRunner:
                     if self.clock.monotonic() < self.retry_after[name]:
                         strategy_results[name] = {"status": "BACKOFF"}
                         continue
+                    self.throttled.tag = name
                     try:
                         if name in self.bridges:
                             strategy_results[name] = self.engines[name].run_once(self.bridges[name])
@@ -214,10 +223,18 @@ class AccountRunner:
                         log.exception("strategy %s failed", name)
                         if self.account.blocked:
                             raise
-                self.account.sync()
+                    finally:
+                        self.throttled.tag = None
+                if self.account.dirty:          # only re-read the venue if something was sent/cancelled
+                    self.account.sync()
                 status = "PARTIAL" if any(r.get("status") in {"ERROR", "BACKOFF"} for r in strategy_results.values()) else "OK"
                 result = {"status": status, "strategies": strategy_results}
             self.failures, self.last_error = 0, None
+        except AccountReadDegraded as exc:
+            self.failures += 1
+            self.last_error = str(exc)
+            log.warning("%s", exc)
+            result = {"status": "DEGRADED", "reason": self.last_error}
         except Exception as exc:
             self.failures += 1
             self.last_error = str(exc)
@@ -230,7 +247,8 @@ class AccountRunner:
         _write_json(self.state_dir / "status.json", {
             "timestamp": self.clock.now().isoformat(), "mode": self.mode, "result": result,
             "active_strategies": self.strategy_names, "iterations": self.iterations, "failures": self.failures,
-            "http_peak": self.throttled.peak, "account": account_report,
+            "http_peak": self.throttled.peak, "http_by_strategy": dict(self.throttled.by_tag),
+            "http_last_minute": self.throttled.requests_last_minute(), "account": account_report,
             "market_data": self.market_data.status(),
         })
         return result

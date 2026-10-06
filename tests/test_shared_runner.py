@@ -119,18 +119,23 @@ def test_bootstrap_transfer_preserves_rxm_return_and_lock_state(tmp_path):
         runner.close()
 
 
-def test_failed_balance_read_reports_blocked_then_recovers(tmp_path):
+def test_failed_balance_read_reports_degraded_then_recovers(tmp_path):
     runner, sim, clock = shared(tmp_path)
     try:
         original = sim.get_balance
         sim.get_balance = lambda: {"Success": False, "ErrMsg": "temporary exchange failure"}
-        assert runner.run_once()["status"] == "BLOCKED"
+        sent = len(sim.history)
+        assert runner.run_once()["status"] == "DEGRADED"
         assert runner.failures == 1
+        assert len(sim.history) == sent             # no strategy step on a stale wallet
         status = json.loads((runner.state_dir / "status.json").read_text())
-        assert status["result"]["status"] == "BLOCKED"
+        assert status["result"]["status"] == "DEGRADED"
+        assert "reads" in status["account"]["restrictions"]
+        assert status["account"]["blocked"] is None  # the ledger itself is intact
         sim.get_balance = original
         assert runner.run_once()["status"] == "OK"
         assert runner.failures == 0
+        assert "reads" not in runner.account.report()["restrictions"]
     finally:
         runner.close()
 

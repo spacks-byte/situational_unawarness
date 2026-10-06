@@ -81,7 +81,7 @@ def run_shared_replay(settings, start, days, cash, out_dir, keep_state=False):
         while clock.now() < end:
             result = runner.run_once()
             statuses[result["status"]] += 1
-            if result["status"] in {"BLOCKED", "PARTIAL"}:
+            if result["status"] in {"BLOCKED", "DEGRADED", "PARTIAL"}:
                 raise RuntimeError(f"account replay failed: {result}")
             clock.sleep(min(runner.poll_seconds, (end-clock.now()).total_seconds()))
         runner.account.sync()

@@ -44,6 +44,8 @@ class ThrottledPort:
         self.total_sleep = 0.0
         self.peak = 0
         self.is_live = bool(getattr(port, "is_live", False))
+        self.tag: str | None = None                 # who is spending requests now (shared account)
+        self.by_tag: dict[str, int] = {}
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._port, name)
@@ -84,3 +86,5 @@ class ThrottledPort:
         self._window.append((now, weight))
         self.peak = max(self.peak, sum(w for _, w in self._window))
         self.total_http += weight
+        key = self.tag or "account"
+        self.by_tag[key] = self.by_tag.get(key, 0) + weight

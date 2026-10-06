@@ -172,3 +172,88 @@ def test_slightly_early_closed_event_waits_for_local_close_time():
     clock.advance(.5)
     assert read("PEPE", ts, pd.Timestamp(clock.now())).close.tolist() == [10.]
     assert not md.publish()["quotes"]["PEPE"]["stale"]
+
+
+def bars15(coin, start, end):
+    index = pd.date_range(pd.Timestamp(start).ceil("15min"), end, inclusive="left", freq="15min")
+    return pd.DataFrame({"open": 10., "high": 10., "low": 10., "close": 10.}, index=index)
+
+
+def test_coarse_only_coins_get_no_one_second_streams():
+    clock = SimClock(datetime(2026, 1, 1, 1, tzinfo=UTC))
+    md = MarketDataEngine(clock, {"1s": history, "15m": bars15},
+                          {("PEPE", "1s"): 120, ("BTC", "15m"): 86400}, stream_url="wss://test/stream")
+    sockets = []
+    class Socket:
+        def __init__(self, url, **callbacks):
+            self.url = url
+            sockets.append(self)
+        def run_forever(self, **kwargs):
+            md._stop.set()
+        def close(self):
+            pass
+    md.websocket_factory = Socket
+    md._stream_loop()
+    url = sockets[0].url
+    assert "pepeusdt@kline_1s" in url and "pepeusdt@bookTicker" in url
+    assert "btcusdt@kline_15m" in url and "btcusdt@kline_1s" not in url and "btcusdt@bookTicker" not in url
+    md.advance(force=True)
+    assert set(md.publish()["quotes"]) == {"PEPE"}           # no quote snapshots for RXM-only coins
+
+
+def test_stream_verifies_tls_and_falls_back_to_the_next_endpoint():
+    clock = RealClock()
+    attempts = []
+    connected = threading.Event()
+    class Socket:
+        def __init__(self, url, on_open, on_message, on_error):
+            self.url, self.opened, self.error = url, on_open, on_error
+            self.stopped = threading.Event()
+            attempts.append(self)
+        def run_forever(self, **kwargs):
+            self.kwargs = kwargs
+            if "primary" in self.url:
+                self.error(self, ConnectionError("handshake failed"))
+                return
+            self.opened(self)
+            connected.set()
+            self.stopped.wait(5)
+        def close(self):
+            self.stopped.set()
+    md = MarketDataEngine(clock, {"1s": lambda *a: _empty()}, {("PEPE", "1s"): 120},
+                          stream_url=["wss://primary/stream", "wss://fallback/stream"], websocket_factory=Socket)
+    try:
+        md.start()
+        assert connected.wait(4)
+        assert [a.url.split("?")[0] for a in attempts] == ["wss://primary/stream", "wss://fallback/stream"]
+        sslopt = attempts[0].kwargs["sslopt"]
+        assert sslopt.get("cert_reqs", 2) == 2                # ssl.CERT_REQUIRED: never disabled
+        assert sslopt.get("ca_certs") and md.status()["stream_url"] == "wss://fallback/stream"
+    finally:
+        md.close()
+
+
+def test_rxm_candles_keep_arriving_over_rest_while_the_stream_is_down():
+    clock = RealClock()
+    calls = []
+    def source(coin, start, end):
+        calls.append((coin, start, end))
+        return bars15(coin, start, end)
+    class DeadSocket:
+        def __init__(self, url, on_open, on_message, on_error):
+            self.error = on_error
+        def run_forever(self, **kwargs):
+            self.error(self, ConnectionError("stream unreachable"))
+        def close(self):
+            pass
+    md = MarketDataEngine(clock, {"15m": source}, {("BTC", "15m"): 86400},
+                          stream_url=["wss://a/stream", "wss://b/stream"], websocket_factory=DeadSocket)
+    try:
+        md.start()
+        now = pd.Timestamp(clock.now())
+        bars = md.fetch("15m")("BTC", now-pd.Timedelta(hours=6), now)
+        assert len(bars) >= 23 and bars.index[-1] == now.floor("15min")-pd.Timedelta(minutes=15)
+        assert not md.status()["connected"] and md.status()["stream_error"]
+        assert calls and not md.status()["errors"]          # served by the REST source alone
+    finally:
+        md.close()

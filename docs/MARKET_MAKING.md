@@ -10,16 +10,18 @@ strategies by default; `--strategies` can select either one. An inactive strateg
 is not instantiated and requires no feature data. Its allocated capital stays in
 its own book; selection never transfers money or liquidates its holdings. Existing
 resting orders remain owned and reconciled even when their strategy is inactive.
-A strategy's feature-source failure does not prevent another strategy from running;
-account reconciliation failures block new risk across the account.
+A strategy's feature-source failure does not prevent another strategy from running.
+A reconciliation finding restricts only the strategy, coin, short pair or cash use it
+is traced to (see "Reconciliation and recovery"); it never halts the whole account.
 
 ## Shared market data
 
 `tradebot.data.engine.MarketDataEngine` is independent of both strategies. One
 producer owns the public Binance WebSocket connection and REST bootstrap/repair.
-For each active instrument it receives best bid/ask updates and completed one-second
-candles, then publishes a cached snapshot every second. RXM also subscribes to
-completed 15-minute candles and retains its 50-day warmup. Overlapping instruments
+For each MM instrument it receives best bid/ask updates and completed one-second
+candles, then publishes a cached snapshot every second. RXM instruments get only
+completed 15-minute candles (and its 50-day warmup): no one-second or book-ticker
+streams are opened for coins that no consumer quotes. Overlapping instruments
 share one subscription. MM-only startup does not load RXM's history or runtime;
 RXM-only startup does not load MM's history or runtime.
 
@@ -33,7 +35,13 @@ includes connection, gap and source-error status. A disconnected feed reconnects
 and repairs history. Stale observations cannot create MM quotes.
 
 The stream endpoint is configurable with `live.market_stream_url` (default
-`wss://stream.binance.com:9443/stream`); REST uses `live.klines_url`. These are
+`wss://stream.binance.com:9443/stream`), followed by `live.market_stream_fallback_urls`
+(default the market-data-only `wss://data-stream.binance.vision/stream`), tried in
+order whenever a connection cannot be established. REST uses `live.klines_url`.
+TLS verification is always on; the handshake uses the `certifi` CA bundle so a bare
+Windows/Python install does not need `SSL_CERT_FILE`. RXM never depends on the
+stream: with it down, its closed 15-minute candles arrive through the REST repair
+pass (every 30 s), well inside the bridge's 30-minute late-bar grace. These are
 **Binance reference prices**. The execution coordinator still checks fresh Roostoo
 bid/ask prices before submitting MM orders. The one-second data cadence does not
 change MM's 600-second order refresh or RXM's existing rebalance schedule.
@@ -123,14 +131,80 @@ Existing orders win that conflict. Market short closes are conservatively blocke
 when an account-owned opposing limit exists for that coin.
 
 Order IDs, cumulative fills, USD commissions, cost basis and reservations are
-journaled. Submission intents commit before the network call. A lost spot response
-can be recovered only if history uniquely identifies the submitted order; otherwise
-new risk stays blocked. Ambiguous short mutations require operator reconciliation.
-A cancel ACK never frees inventory or cash by itself: the final order state must
-confirm cancellation or a fill. Ambiguous pending fill quantities, non-USD spot
-commissions, unknown orders, unexplained balance changes and invalid state block
-trading rather than guessing. Separate venue reads can briefly disagree during a
-fill; the coordinator retries those reads up to three times, without sending orders.
+journaled. Submission intents commit before the network call. A cancel ACK never
+frees inventory or cash by itself: the final order state must confirm cancellation
+or a fill.
+
+## Reconciliation and recovery
+
+Every sync reads pending orders, wallet, short positions and tickers, applies fills,
+and compares the ledger with the venue. Separate venue reads can briefly disagree
+during a fill, so a sync with findings reads once more (fills are cumulative, so
+re-applying is idempotent) before anything is restricted. Findings are graded:
+
+| Severity | Example | Effect |
+| --- | --- | --- |
+| rounding | commission/proceeds rounding inside tolerance | absorbed: booked to the strategies whose fills caused it and counted in `adjustments` |
+| delayed | lost response, cancel not yet settled, venue read failed | reservation and intent kept, resolved from venue evidence on later syncs; only that coin/pair is restricted meanwhile |
+| material | inventory or cash gap beyond tolerance, unknown order | only the traced scope is restricted; it lifts after `restriction_clear_syncs` (2) clean syncs |
+| unresolved | the same finding 5 syncs in a row | labelled for a person to resolve (`tradebot account explain`) |
+
+Scopes (`engine/state/restrictions.py`) refuse only **new** orders:
+
+| Scope | Refuses |
+| --- | --- |
+| `reads` | every new order until a venue read succeeds (the loop reports `DEGRADED` and backs off) |
+| `coin:<C>` | new orders on coin C, both strategies |
+| `cash:<strategy>` / `cash:account` | new BUY / SHORT_OPEN of that strategy / of both |
+| `short:<PAIR>` | short opens and partial closes on PAIR; a full close stays allowed |
+| `strategy:<S>` | every new order of strategy S |
+
+Sells, short covers and cancels on unrestricted scopes keep working, so open risk can
+always be reduced. Market data, syncing and recovery never stop.
+
+**Cash tolerance.** `max(cash_tolerance_floor_usd, cash_tolerance_bps x fill notional)`,
+default `max($0.05, 3 bps)`. 3 bps is deliberately below the smallest fee (the 5 bps
+maker fee): a doubled or missing fee is never absorbed as rounding, while sub-cent
+commission rounding always is. The configurable range is 0-30 bps. A gap beyond it
+is traced to the strategy whose fills caused it and keeps that attribution while it
+persists; with no traceable owner it restricts `cash:account`.
+
+**Lost spot responses.** The intent stays `SUBMITTING` with its reservation and the
+coin is restricted. Each sync searches the venue's order history (paged; completeness
+never assumes the page order) for exactly one unowned order with the same pair, side,
+price, quantity and a creation time within `evidence_window_seconds` (30 s). One match
+is adopted. Several matches stay unresolved. No match in a provably complete history
+more than two windows later means the order never executed and the intent is
+rejected. Nothing is ever resubmitted blindly.
+
+**Lost short responses.** Roostoo has no client order IDs, so the evidence is the
+short position against `before_short_qty` and resting SHORT_OPEN rows. A position move
+within 2% of the request is booked (a recovered close re-baselines RXM's residual
+cash, since its P&L and fee were only in the lost reply); one unowned resting row
+is adopted for a limit open; no move after two windows means not executed.
+
+**Cancels.** A cancel marks the order `CANCELING`. Its reservation is kept and no
+replacement is quoted on that coin/side until the venue shows a terminal state. An
+unacknowledged or unsettled cancel is re-sent after `cancel_retry_seconds` (30 s).
+
+**Restarts.** Intents and their states are durable, so a restart mid-submit or
+mid-cancel resumes exactly the recovery above.
+
+## Request budget
+
+All Roostoo requests share one limiter at 25 requests/minute (venue limit 30); the
+cap is never raised to absorb contention. Each loop runs RXM before MM, so an RXM
+rebalance never queues behind an MM refresh in the same loop. Measured costs
+(`tests/test_request_budget.py`):
+
+| Operation | Requests |
+| --- | --- |
+| account sync | 4 (+1 per order that left the book) |
+| MM quote submit / cancel | 2 / 2 |
+| RXM spot order / cancel | 1 / 3 (previously 5 / 6) |
+
+`status.json` reports `http_by_strategy`, `http_last_minute`, and
+`account.quote_stats` (submitted quotes, quote age, quotes dropped at their deadline).
 
 API shapes and precision rules are based on the [Roostoo API documentation](https://github.com/roostoo/Roostoo-API-Documents).
 The candle source uses Binance's documented [one-second klines](https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/market).
@@ -138,9 +212,46 @@ The candle source uses Binance's documented [one-second klines](https://develope
 ## Run and stop
 
 Run from the repository root after installing `.[dev]`. Stop the standalone RXM
-process before starting the shared coordinator. Both updated runners use the same
-exclusive account lock, `var/roostoo-account.lock`; an older already-running binary
-must be stopped explicitly. All exchange requests share one 25-calls/minute limiter.
+process before starting the shared coordinator. Both updated runners take the same
+exclusive OS lock per Roostoo account, independent of the working directory:
+`%LOCALAPPDATA%\tradebot\locks\account-<id>.lock` on Windows,
+`$XDG_STATE_HOME/tradebot/locks/` (default `~/.local/state/tradebot/locks/`) elsewhere,
+or `$TRADEBOT_LOCK_DIR`. `<id>` is a hash of the API URL and key; no credential is
+written. `<lock>.holder.json` names the holding pid, host and state directory. The
+OS releases the lock when the process dies. `market_making.account_lock` overrides
+the path. An older already-running binary does not take this lock and must be
+stopped explicitly. All exchange requests share one 25-calls/minute limiter.
+
+## Preflight and migration
+
+Both commands are read-only: the venue is read through a port that refuses every
+order, cancel and short call, SQLite files are opened `mode=ro`, and the lock is
+probed without being taken.
+
+```bash
+python -m tradebot --config config/market-making.yaml account preflight   # exit 0 = ready
+python -m tradebot --config config/market-making.yaml account explain     # no network
+```
+
+`preflight` reports equity, the 70/30 split, the MM funding shortfall, spot and
+short positions (attributed to RXM at takeover), resting orders that are in neither
+the RXM journal nor `portfolio.db`, a held account lock, an active standalone RXM
+runner (recent `status.json` in `rxm_state_dir`), and an existing ledger whose
+allocation differs from the config. `explain` shows the active restrictions with
+reasons, intents still awaiting the venue, rounding adjustments, quote stats and
+the recent recovery events.
+
+Migration from the standalone RXM runner (operator steps; nothing is automatic):
+
+1. Run `account preflight` while the old runner is still trading. Note blockers.
+2. Resolve any shortfall or unknown order **by hand**. Preflight never sells,
+   adopts or cancels anything, and the coordinator will not either.
+3. Stop the old runner and wait for its loop to end. Keep its state directory.
+4. Run `account preflight` again: it must exit 0 (no lock holder, legacy runner idle).
+5. Start a dry run with a new state directory and check `status.json`.
+6. Start execution with its own new state directory; never reuse dry-run state and
+   never delete `portfolio.db`. To roll back, stop the coordinator and restart the
+   old runner on its untouched state directory; positions stay where they are.
 
 Read-only dry run (including blocked order and cancellation transport):
 
@@ -277,3 +388,16 @@ extreme inputs without requiring the sibling repository in CI.
 
 The historical tests validate mechanics and policy parity, not future returns or
 an exact match to live Roostoo execution. No live orders were sent.
+
+## Account remediation (2026-10-07)
+
+- `python -m pytest -q` on Windows: all tests pass, including portable account
+  locking (`tests/test_locking.py`), venue-shaped failure injection
+  (`tests/test_venue_failures.py`: P1 docs-shaped pending rows, P2 rounding sweep,
+  P3 lost short open/close, P4 delayed and unacknowledged cancels, restarts
+  mid-submit/mid-cancel, history paging order, strategy independence), request
+  budget (`tests/test_request_budget.py`), stream fallback/TLS/REST-only RXM
+  (`tests/test_market_engine.py`) and read-only preflight (`tests/test_preflight.py`).
+- Venue behaviour is still inferred from documentation and the simulator. The real
+  order protocol in `docs/ACCOUNT_VALIDATION.md` must be run on a separate test account
+  before deployment.
