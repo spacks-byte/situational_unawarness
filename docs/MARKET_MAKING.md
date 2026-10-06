@@ -50,6 +50,25 @@ Replay uses the same cache with an injected clock and local candle sources, with
 threads or network. It delivers elapsed observations deterministically; it never
 fabricates one-second quotes from RXM's 15-minute historical candles.
 
+### Local copy of market data
+
+Live runs keep every closed candle the producer receives under `live.market_store_dir`
+(default `var/market`): one-second candles for the MM coins and RXM's 15-minute
+candles, one file per coin per UTC day. Today's file is an append-only CSV; finished
+days are compacted to Parquet (zstd) and days older than
+`live.market_store_retention_days` (30) are deleted. A background thread does all
+disk work, so a slow or failing disk never delays market data or orders. Below
+`live.market_store_min_free_gb` (1 GB) free space the copy pauses (reported in
+`status.json` under `market_data.store`) and resumes on its own; trading continues.
+
+On start the cache is filled from disk first; REST then fetches only the gap since
+the last stored bar (and the head of RXM's 50-day window beyond the retention).
+A restart therefore needs a few REST calls instead of a full warmup download, and
+starts with history even if Binance REST is unreachable. It costs no extra bandwidth
+(the data is already received) and no Roostoo requests. Worst-case size is ~7 MB per
+coin per day of one-second candles, under 0.7 GB for three MM coins at 30 days.
+Replay and tests never write it.
+
 The live stream follows Binance's [documented kline and book-ticker streams](https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/ws-streams/~).
 
 ## Deferred: strategy-neutral position ownership
@@ -398,6 +417,13 @@ an exact match to live Roostoo execution. No live orders were sent.
   mid-submit/mid-cancel, history paging order, strategy independence), request
   budget (`tests/test_request_budget.py`), stream fallback/TLS/REST-only RXM
   (`tests/test_market_engine.py`) and read-only preflight (`tests/test_preflight.py`).
+- Read-only public-data smoke test (no keys, no Roostoo): `stream.binance.com` returned
+  HTTP 451 (restricted location) from this host; the fallback `data-stream.binance.vision`
+  connected with verified TLS (certifi). The local store wrote 410 candles in 12 s and a
+  restart loaded 299 one-second and 96 fifteen-minute rows from disk.
+- Open blocker (docs/REVIEW.md section 7): live one-second candles arrive 2-3 s after
+  their open time, but MM only quotes when the `now - 1 s` candle is cached, so live MM
+  would rarely quote. Not changed here; needs the quant's agreement on decision timing.
 - Venue behaviour is still inferred from documentation and the simulator. The real
   order protocol in `docs/ACCOUNT_VALIDATION.md` must be run on a separate test account
   before deployment.

@@ -15,6 +15,7 @@ from tradebot.engine import Engine
 from tradebot.engine.execution.quotes import QuoteExecutor
 from tradebot.engine.state.portfolio import AccountCoordinator, AccountLock, PortfolioStore, MM
 from tradebot.data.engine import MarketDataEngine
+from tradebot.data.store import MarketDataStore
 from tradebot.data.market import binance_public_fetch
 from tradebot.live.runner import LiveRunner, _universe, _write_json, account_lock_path
 from tradebot.live.throttle import ThrottledPort
@@ -114,8 +115,14 @@ class AccountRunner:
                 windows.update({(coin, "15m"): settings.live.buffer_days*86400 for coin in _universe(rxm_settings)})
                 sources["15m"] = fetch or binance_public_fetch(settings.live.klines_url)
             streams = [settings.live.market_stream_url, *settings.live.market_stream_fallback_urls]
+            live_data = isinstance(self.clock, RealClock)
+            store = None
+            if live_data and settings.live.market_store_enabled:
+                store = MarketDataStore(settings.live.market_store_dir,
+                                        retention_days=settings.live.market_store_retention_days,
+                                        min_free_bytes=int(settings.live.market_store_min_free_gb * 1e9))
             self.market_data = MarketDataEngine(self.clock, sources, windows,
-                stream_url=streams if isinstance(self.clock, RealClock) else None)
+                stream_url=streams if live_data else None, store=store)
             self.market_data.start()
             for name in self.strategy_names:
                 strategy_class = STRATEGIES[name]

@@ -153,6 +153,11 @@ class LiveConfig(_Section):
     market_stream_url: str = "wss://stream.binance.com:9443/stream"
     # Tried in order after a failed connection (market-data-only Binance endpoint, same events)
     market_stream_fallback_urls: list[str] = ["wss://data-stream.binance.vision/stream"]
+    # Local copy of live market data (shared account engine): restarts and outages start from disk
+    market_store_enabled: bool = True
+    market_store_dir: str = "var/market"
+    market_store_retention_days: int = Field(default=30, ge=1)
+    market_store_min_free_gb: float = Field(default=1.0, ge=0)   # below this, stop saving; trading continues
     buffer_days: int = 50                 # >= 45: 30-day beta + 14-day lookback
     bar_grace_minutes: int = 30           # wait this long for a late decision bar before going without it
     stale_after_hours: float = 2.0        # no new candle for this long: hold the book

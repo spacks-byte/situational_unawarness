@@ -36,7 +36,7 @@ INTERVALS = {"1s": pd.Timedelta(seconds=1), "15m": pd.Timedelta(minutes=15)}
 
 
 class MarketDataEngine:
-    def __init__(self, clock, sources, windows, *, stream_url=None, websocket_factory=None):
+    def __init__(self, clock, sources, windows, *, stream_url=None, websocket_factory=None, store=None):
         """windows maps (coin, interval) to retained seconds, with no strategy names.
 
         stream_url=None selects deterministic local-history replay. Live mode uses
@@ -45,6 +45,9 @@ class MarketDataEngine:
         Only coins with a one-second window get one-second klines and book tickers;
         coarse-only consumers (RXM) receive closed candles from the stream when it is up
         and from the REST repair pass (every 30 s) otherwise, so they never depend on it.
+        store (tradebot.data.store.MarketDataStore) keeps a local copy of every closed
+        candle received; on start the cache is filled from it first and REST only
+        backfills what is missing since.
         """
         self.clock, self.sources = clock, dict(sources)
         self.windows = {(to_coin(c), interval): seconds for (c, interval), seconds in windows.items()}
@@ -57,6 +60,7 @@ class MarketDataEngine:
         self.stream_urls = [u for u in urls if u]
         self.stream_url = self.stream_urls[0] if self.stream_urls else None
         self.websocket_factory = websocket_factory
+        self.store = store
         self.frames = {}
         self.books = {}
         self.errors = {}
@@ -78,6 +82,9 @@ class MarketDataEngine:
         self._subscribers.append(callback)
 
     def start(self):
+        if self.store is not None:
+            self.store.start()
+            self._load_local()
         self.advance(force=True)
         if self.stream_url:
             if self.websocket_factory is None:
@@ -97,8 +104,34 @@ class MarketDataEngine:
             self._socket.close()
         for thread in self._threads:
             thread.join(timeout=2)
+        if self.store is not None:
+            self.store.close()
 
-    def _merge(self, coin, interval, data):
+    def _load_local(self):
+        """Seed the cache from the local store; REST then fetches only the tail since its last bar."""
+        now = pd.Timestamp(self.clock.now()).floor("s")
+        for (coin, interval), retention in self.windows.items():
+            end = now.floor(INTERVALS[interval])
+            start = end-pd.Timedelta(seconds=retention)
+            try:
+                local = self.store.load(coin, interval, start, end)
+                if not len(local):
+                    continue
+                self._merge(coin, interval, local, persist=False)
+                if local.index[0] > start:
+                    # The store keeps fewer days than this window (e.g. RXM's 50-day warmup with
+                    # 30-day retention): fetch the older head; advance() fetches the tail.
+                    head = self.sources[interval](coin, start, local.index[0])
+                    if head is not None and len(head):
+                        self._merge(coin, interval, head[(head.index >= start) & (head.index < local.index[0])],
+                                    persist=False)      # older than the store keeps anyway
+            except Exception as exc:      # a bad local file or failed head fetch: full REST bootstrap
+                log.warning("local market data %s %s unusable: %s", coin, interval, exc)
+                with self._lock:
+                    self.frames.pop((coin, interval), None)
+                    self.gaps.discard((coin, interval))
+
+    def _merge(self, coin, interval, data, persist=True):
         if data is None or not len(data):
             return
         frame = data.copy()
@@ -119,6 +152,9 @@ class MarketDataEngine:
         key = (coin, interval)
         with self._lock:
             old = self.frames.get(key)
+            if persist and self.store is not None:
+                fresh = frame if old is None else frame[~frame.index.isin(old.index)]
+                self.store.submit(coin, interval, fresh)
             if old is not None and len(old):
                 frame = pd.concat([old, frame])
             frame = frame[~frame.index.duplicated(keep="last")].sort_index()
@@ -243,7 +279,8 @@ class MarketDataEngine:
             return {"connected": self.connected, "stream_url": self.stream_url, "stream_error": self.stream_error,
                     "published_at": self.published["timestamp"],
                     "symbols": self.symbols, "errors": {f"{c}/{i}": e for (c, i), e in self.errors.items()},
-                    "gaps": [f"{c}/{i}" for c, i in sorted(self.gaps)]}
+                    "gaps": [f"{c}/{i}" for c, i in sorted(self.gaps)],
+                    "store": self.store.status() if self.store is not None else None}
 
     def _stream_loop(self):
         streams = []

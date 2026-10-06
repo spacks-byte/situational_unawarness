@@ -189,3 +189,16 @@ unchanged apart from the shared lock path.
 2. run `account preflight` against the competition account (read-only) and resolve blockers by hand;
 3. follow the migration steps in `docs/MARKET_MAKING.md`. Stopping the running competition bot is an operator
    decision and needs explicit authorization.
+
+**Open deploy blocker found by the live data smoke test (not changed here: it alters MM decision timing).**
+`MMFluctuation.generate_quotes` only quotes a coin when the candle for `now - 1 s` is already cached
+(`cursor == second - 1`). On the public stream, closed one-second candles arrive 2-3 s after their
+open time (16 snapshots from this host: lag 2-3 s every time). So at decision time that candle is
+almost never present: MM emits an empty batch and waits the full 600 s refresh, repeatedly. Replay
+cannot show this because simulated data is never late. Proposed fix: the quote bridge decides at
+`min(now, last complete second + 1 s)` when that is at most a few seconds behind (a replay no-op,
+so policy parity is unchanged), and reports the data lag. Needs the quant's agreement.
+
+**Binance access from the deployment host:** `stream.binance.com` answered HTTP 451 (restricted
+location) from this machine; the fallback `data-stream.binance.vision` connected with verified TLS.
+Check both from the AWS host before deployment.

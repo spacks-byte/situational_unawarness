@@ -24,6 +24,9 @@ live:
   strategies: [mm-10m-fluctuation, rxm]  # either strategy can be selected alone
   mode: comp
   state_dir: var/shared-dry-run         # one directory per account + mode; never reuse a dry-run directory
+  market_store_dir: var/market          # local copy of live candles (1s MM coins, 15m RXM); shared by modes
+  market_store_retention_days: 30
+  market_store_min_free_gb: 1.0         # below this free space the copy pauses; trading continues
   escalate: true                   # off-target symbols: 5 bp passive, then at the last price, then cross
   ladder_bps: [5.0, 0.0]           # (buys/sells +-10 bp marketable, short opens market): book complete
   cross_bps: 10.0                  # ~33 min after the rebalance even if passive limits never fill
