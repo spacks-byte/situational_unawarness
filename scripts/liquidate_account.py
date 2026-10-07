@@ -32,6 +32,8 @@ def _rows(response: dict[str, Any] | list[dict[str, Any]]) -> list[dict[str, Any
     if isinstance(response, list):
         return response
     if response.get("Success") is False:
+        if "no order matched" in str(response.get("ErrMsg", "")).lower():
+            return []
         raise RuntimeError(response.get("ErrMsg", "exchange request failed"))
     rows = response.get("OrderMatched")
     if rows is None and isinstance(response.get("OrderDetail"), dict):
