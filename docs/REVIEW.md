@@ -190,14 +190,20 @@ unchanged apart from the shared lock path.
 3. follow the migration steps in `docs/MARKET_MAKING.md`. Stopping the running competition bot is an operator
    decision and needs explicit authorization.
 
-**Open deploy blocker found by the live data smoke test (not changed here: it alters MM decision timing).**
+**MM decision time with late candles (found by the live data smoke test; fixed with the team's agreement).**
 `MMFluctuation.generate_quotes` only quotes a coin when the candle for `now - 1 s` is already cached
-(`cursor == second - 1`). On the public stream, closed one-second candles arrive 2-3 s after their
-open time (16 snapshots from this host: lag 2-3 s every time). So at decision time that candle is
-almost never present: MM emits an empty batch and waits the full 600 s refresh, repeatedly. Replay
-cannot show this because simulated data is never late. Proposed fix: the quote bridge decides at
-`min(now, last complete second + 1 s)` when that is at most a few seconds behind (a replay no-op,
-so policy parity is unchanged), and reports the data lag. Needs the quant's agreement.
+(`cursor == second - 1`). Live, a closed one-second candle arrives some time after its second ends:
+0.05-0.5 s in one measurement, 2-3 s in another earlier the same day. Whenever the 600 s refresh
+read the cache before that candle arrived (every read at +0.05 s into a second: 0 of 15 would have
+quoted), MM emitted an empty batch and waited a full refresh. Replay cannot show this because
+simulated data is never late. Now `QuoteBridge.decision_time` decides at "last complete second + 1 s"
+when that is at most `market_making.max_data_delay_seconds` (5 s) behind the wall clock, using the
+earliest such second over the MM coins; a coin further behind stays stale and does not quote. With
+fresh data (always in replay) the wall-clock time is used unchanged, so policy parity and replay
+results are identical. The cold-start warmup fetch reaches back far enough for the shifted decision.
+`quote_stats.decision_lag_seconds` reports the data age at each decision.
+Tests: `tests/test_quote_timing.py` (a 2 s late feed produces exactly the on-time quotes; fresh data
+keeps the wall clock; >5 s late does not quote; one stale coin does not hold back the others).
 
 **Binance access from the deployment host:** `stream.binance.com` answered HTTP 451 (restricted
 location) from this machine; the fallback `data-stream.binance.vision` connected with verified TLS.

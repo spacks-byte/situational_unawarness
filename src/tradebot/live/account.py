@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import logging
 from pathlib import Path
 import signal
@@ -43,11 +44,34 @@ class QuoteBridge:
         for coin in self.config.allocations:
             state = self.account.state["features"].get(coin, {})
             cursor = state.get("cursor")
+            # Cold start: the warmup window ends at the decision second, up to max_data_delay
+            # before the wall clock; rows older than the warmup are ignored by the strategy.
             start = pd.Timestamp(cursor+1, unit="s", tz="UTC") if cursor is not None else end-pd.Timedelta(
-                seconds=self.config.warmup_seconds)
+                seconds=self.config.warmup_seconds + math.ceil(self.config.max_data_delay_seconds) + 1)
             data[coin] = self.fetch(coin, start, end)
-        return self.strategy.generate(data, now=now, books=self.account.state["mm"],
+        return self.strategy.generate(data, now=self.decision_time(now, data), books=self.account.state["mm"],
                                       features=self.account.state["features"], rules=self.account.rules)
+
+    def decision_time(self, now, data):
+        """Decide at the latest complete second + 1 s when live candles arrive late.
+
+        The policy needs the candle of second t-1 at decision second t. Live one-second
+        candles arrive 2-3 s after their open time, so deciding at the wall clock would
+        almost never find it and MM would post empty batches. Decide instead at the
+        earliest "last complete candle + 1 s" over the coins whose data is at most
+        `max_data_delay_seconds` behind. Data older than that stays stale and does not
+        quote. With fresh data (always in replay) `now` is returned unchanged.
+        """
+        second = pd.Timestamp(now).floor("s")
+        max_delay = pd.Timedelta(seconds=self.config.max_data_delay_seconds)
+        ready = []
+        for coin, frame in data.items():
+            cursor = self.account.state["features"].get(coin, {}).get("cursor")
+            last = frame.index[-1] if len(frame) else (pd.Timestamp(cursor, unit="s", tz="UTC") if cursor is not None else None)
+            if last is not None and second - (last + pd.Timedelta(seconds=1)) <= max_delay:
+                ready.append(last + pd.Timedelta(seconds=1))
+        decision = min(ready, default=second)
+        return now if decision >= second else decision.to_pydatetime()
 
 
 def legacy_ids(directory):

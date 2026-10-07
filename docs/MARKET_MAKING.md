@@ -134,6 +134,9 @@ the formula uses observations through `t-2`; the last completed candle at `t-1`
 sets current capacity and the startup anchor. Observed empty candles are valid;
 missing seconds are never interpolated. Gaps reset the warmup requirement while
 preserving the original anchor and lot. Stale or incomplete data produces no quotes.
+Live candles arrive a little after their second ends, so the quote bridge decides at
+"last complete second + 1 s" when that is at most `max_data_delay_seconds` (5 s)
+behind the wall clock; with fresh data (always in replay) it decides at the wall clock.
 
 Every 600 seconds the engine cancels MM-owned limits by ID, reconciles final fills,
 then calculates replacements. It reserves both sides before submission, without
@@ -421,9 +424,11 @@ an exact match to live Roostoo execution. No live orders were sent.
   HTTP 451 (restricted location) from this host; the fallback `data-stream.binance.vision`
   connected with verified TLS (certifi). The local store wrote 410 candles in 12 s and a
   restart loaded 299 one-second and 96 fifteen-minute rows from disk.
-- Open blocker (docs/REVIEW.md section 7): live one-second candles arrive 2-3 s after
-  their open time, but MM only quotes when the `now - 1 s` candle is cached, so live MM
-  would rarely quote. Not changed here; needs the quant's agreement on decision timing.
+- Live one-second candles can arrive after the MM refresh reads the cache (0.05-0.5 s
+  in one measurement, 2-3 s earlier the same day). MM now decides at "last complete
+  second + 1 s" when that is at most `max_data_delay_seconds` (5 s) behind; with the
+  old wall-clock rule a read at +0.05 s into a second quoted 0 of 15 times, with the
+  new one 15 of 15 (docs/REVIEW.md section 7).
 - Venue behaviour is still inferred from documentation and the simulator. The real
   order protocol in `docs/ACCOUNT_VALIDATION.md` must be run on a separate test account
   before deployment.

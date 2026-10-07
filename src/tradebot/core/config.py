@@ -202,6 +202,8 @@ class MarketMakingConfig(_Section):
     refresh_seconds: int = Field(default=600, ge=600)
     warmup_seconds: int = Field(default=3600, ge=3600)
     feature_lag_seconds: int = Field(default=1, ge=1)
+    # Live 1s candles arrive 2-3 s late: decide at last complete second + 1 s if at most this far behind
+    max_data_delay_seconds: float = Field(default=5.0, ge=0, le=60)
     lot_fraction: float = Field(default=0.05, gt=0, le=1)
     inventory_fraction: float = Field(default=0.70, gt=0, le=1)
     # Reconciliation (docs/MARKET_MAKING.md "Reconciliation without a global halt").

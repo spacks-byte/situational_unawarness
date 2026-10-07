@@ -36,6 +36,7 @@ class QuoteExecutor:
         if not isinstance(batch, QuoteBatch) or batch.strategy_id != MM:
             raise ValueError("quote strategy must return its own QuoteBatch")
         stats = self._stats()
+        stats["decision_lag_seconds"] = (self.clock.now()-batch.timestamp).total_seconds()  # data age at decision
         if (self.clock.now()-batch.timestamp).total_seconds() >= batch.refresh_seconds:
             stats["deadline_missed"] += len(batch.quotes)
             a.store.save("quote_batch_expired", {"signal": batch.signal_id})
@@ -68,7 +69,8 @@ class QuoteExecutor:
         out = {"status": "DRY_RUN" if a.dry_run else "QUOTED", "signal_id": batch.signal_id,
                "quotes": len(batch.quotes), "submitted": sum(r.get("Success") is True for r in results),
                "observations": batch.observations, "awaiting_cancel": sorted(f"{c} {s}" for c, s in waiting),
-               "quote_age_seconds": stats["last_age_seconds"], "deadline_missed_total": stats["deadline_missed"]}
+               "quote_age_seconds": stats["last_age_seconds"], "deadline_missed_total": stats["deadline_missed"],
+               "decision_lag_seconds": stats["decision_lag_seconds"]}
         if errors:
             out["uncertain"] = errors
         return out
