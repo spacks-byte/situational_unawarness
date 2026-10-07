@@ -158,3 +158,53 @@ The quant's branch (`strategy/noise-cancelling-momentum`) was built on the pre-r
 - A dry run against the Roostoo mock exchange with live Binance candles computed the day's real target and sent nothing.
 
 Still open for the competition: AWS deployment files (P0 3), key rotation (P0 4), and the test-account checks in `docs/LIVE_RUNBOOK.md` section 5.
+
+## 7. Shared MM/RXM account remediation (Oct 7)
+
+PR #7 added the long-only MM strategy and a shared-account coordinator. The review reproduced failures in the
+client-interaction layer (probes P1-P4) and a Windows startup crash. The strategy itself (universe, quote formulas,
+long-only rule, >10 bps filter, 70/30 allocation) is unchanged. The general strategy/symbol/quantity/price ownership
+ledger is still a future build.
+
+| Change | Failure it fixes | Expected behaviour | Acceptance test | Remaining limitation |
+|---|---|---|---|---|
+| Portable account lock (`core/locking.py`) | `import fcntl` crashed every Windows start; the relative lock path let two processes in different directories trade one account | one OS lock per account (`msvcrt`/`fcntl`), absolute path keyed to a hash of URL+key, taken by the coordinator and standalone RXM; holder pid/host/state in `.holder.json`, no key material | `tests/test_locking.py` (second holder refused, cwd bypass, RXM runner, no credentials) | an already-running older binary does not take the lock: stop it by hand (preflight detects its `status.json`) |
+| Scoped restrictions instead of a global halt (`engine/state/restrictions.py`) | P1/P2/P3 froze the whole account permanently, including RXM | findings restrict only `coin:`/`cash:`/`short:`/`strategy:` scopes; sells, covers and cancels keep working; lift after 2 clean syncs | `test_unexplained_cash_and_unknown_order_restrict_only_their_scope`, `test_restrictions_stay_with_their_strategy` | an `unresolved` finding (5 syncs) needs a person; there is no `resolve` command yet |
+| Cash tolerance tiers | P2: a $0.03 commission difference blocked the account forever | `max($0.05, 3 bps x fill notional)` absorbed and booked to the causing strategy; beyond it, restrict the traced owner | `test_p2_*` (rounding sweep; doubled/missing maker fee still restricted) | the real venue's rounding size is unmeasured (V4) |
+| Docs-shaped PENDING rows | P1: a PENDING row with `FilledQuantity == Quantity` blocked the account | treated as unfilled, journaled once | `test_p1_pending_rows_reporting_full_filled_quantity_do_not_block` | a genuine partial fill reported in that shape would be missed until the order completes |
+| Lost spot / short responses | P3: a lost short-open reply blocked the account forever; lost spot replies blocked until manual action | intent kept, matched to exactly one venue order (spot) or a position move (short); "not executed" only from a provably complete history after 2 evidence windows; never resubmitted | `test_lost_spot_response_*`, `test_p3_*`, `test_history_paging_order_*`, `test_restart_mid_submit_*` | history page order is undocumented: completeness only at a short page or a newest-first page (V3 checks it) |
+| Pending cancels | P4: a cancel not yet settled raised and left the order unmanaged | `CANCELING` keeps the reservation, no replacement on that side, re-sent after 30 s until terminal | `test_p4_*`, `test_restart_mid_cancel_*` | none known |
+| Recovered short close re-baseline (bug found while testing) | the re-baseline flag lived on an intent that left the active set at the next save, so recovered closes left a permanent cash gap | flag persisted in state and consumed by the next cash check | `test_p3_lost_short_close_*` | — |
+| Fill notional across re-reads (bug found while testing) | the confirmation re-read reset the fill list, so a real gap lost its owner and fell to `cash:account` with the $0.05 floor | fills accumulate until a committed sync; a persisting gap keeps its owner | `test_p2_cash_gap_beyond_tolerance_restricts_only_the_owner` | — |
+| Request budget | RXM order cost 5 and cancel 6 requests (a full sync each); MM could delay RXM | no per-order sync; RXM runs first each loop; cap stays 25/min; quote age and deadline misses reported | `tests/test_request_budget.py` | the 25/min cap is shared: a 6-quote MM refresh still takes ~40 s of budget |
+| Read failures | one failed balance read stopped the loop as BLOCKED | `DEGRADED`: no strategy step on stale data, `reads` scope until a read succeeds, backoff | `test_failed_balance_read_reports_degraded_then_recovers` | — |
+| Market data | 1 s + book-ticker streams opened for every RXM coin; single endpoint; TLS store missing on Windows | 1 s streams only for MM coins; fallback endpoint list; certifi CA bundle with verification on; RXM served by REST repair when the stream is down | `test_coarse_only_*`, `test_stream_verifies_tls_*`, `test_rxm_candles_keep_arriving_over_rest_*` | `data-stream.binance.vision` fallback not yet exercised from the deployment host |
+| Preflight / explain (`live/preflight.py`) | takeover decisions required manual API calls with competition keys | read-only report of shortfall, positions, unknown orders, lock holder, legacy runner, allocation drift; exit 0 = ready | `tests/test_preflight.py` (no mutating call, nothing written) | detects a legacy runner only on the same host/state dir |
+
+**Merge-ready:** yes. All tests pass on Windows (`python -m pytest -q`). The default standalone RXM profile is
+unchanged apart from the shared lock path.
+
+**Deploy-ready:** not yet. Before the shared coordinator trades the competition account:
+1. run `docs/ACCOUNT_VALIDATION.md` (V1-V10) on a **separate test account** and record the results;
+2. run `account preflight` against the competition account (read-only) and resolve blockers by hand;
+3. follow the migration steps in `docs/MARKET_MAKING.md`. Stopping the running competition bot is an operator
+   decision and needs explicit authorization.
+
+**MM decision time with late candles (found by the live data smoke test; fixed with the team's agreement).**
+`MMFluctuation.generate_quotes` only quotes a coin when the candle for `now - 1 s` is already cached
+(`cursor == second - 1`). Live, a closed one-second candle arrives some time after its second ends:
+0.05-0.5 s in one measurement, 2-3 s in another earlier the same day. Whenever the 600 s refresh
+read the cache before that candle arrived (every read at +0.05 s into a second: 0 of 15 would have
+quoted), MM emitted an empty batch and waited a full refresh. Replay cannot show this because
+simulated data is never late. Now `QuoteBridge.decision_time` decides at "last complete second + 1 s"
+when that is at most `market_making.max_data_delay_seconds` (5 s) behind the wall clock, using the
+earliest such second over the MM coins; a coin further behind stays stale and does not quote. With
+fresh data (always in replay) the wall-clock time is used unchanged, so policy parity and replay
+results are identical. The cold-start warmup fetch reaches back far enough for the shifted decision.
+`quote_stats.decision_lag_seconds` reports the data age at each decision.
+Tests: `tests/test_quote_timing.py` (a 2 s late feed produces exactly the on-time quotes; fresh data
+keeps the wall clock; >5 s late does not quote; one stale coin does not hold back the others).
+
+**Binance access from the deployment host:** `stream.binance.com` answered HTTP 451 (restricted
+location) from this machine; the fallback `data-stream.binance.vision` connected with verified TLS.
+Check both from the AWS host before deployment.

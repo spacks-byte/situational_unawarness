@@ -82,3 +82,41 @@ class TargetPortfolio(BaseModel):
         self.flatten = list(dict.fromkeys(s for s in normalized_flatten if s))
         self.exit_prices = {s.strip().upper(): float(p) for s, p in self.exit_prices.items() if p and p > 0}
         return self
+
+
+class LimitQuote(BaseModel):
+    """A fixed-price, fixed-quantity spot order; no reversal or short semantics."""
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+    symbol: str = Field(min_length=1)
+    side: str
+    quantity: float = Field(gt=0)
+    price: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_side(self):
+        if self.side not in {"BUY", "SELL"} or self.symbol != self.symbol.strip().upper():
+            raise ValueError("quotes require uppercase symbols and BUY/SELL sides")
+        return self
+
+
+class QuoteBatch(BaseModel):
+    """Replacement quotes for a strategy, including an empty cancellation-only batch."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    strategy_id: str = "mm-10m-fluctuation"
+    signal_id: str
+    timestamp: datetime
+    refresh_seconds: int = Field(default=600, ge=1)
+    quotes: list[LimitQuote] = Field(default_factory=list)
+    observations: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_batch(self):
+        if self.timestamp.tzinfo is None:
+            raise ValueError("timestamp must be timezone-aware")
+        keys = [(q.symbol, q.side) for q in self.quotes]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate quote side")
+        return self
+
+
+StrategyOutput = TargetPortfolio | QuoteBatch

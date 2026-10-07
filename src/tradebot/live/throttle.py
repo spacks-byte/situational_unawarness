@@ -44,6 +44,8 @@ class ThrottledPort:
         self.total_sleep = 0.0
         self.peak = 0
         self.is_live = bool(getattr(port, "is_live", False))
+        self.tag: str | None = None                 # who is spending requests now (shared account)
+        self.by_tag: dict[str, int] = {}
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._port, name)
@@ -60,17 +62,29 @@ class ThrottledPort:
         now = self._clock.monotonic()
         return sum(w for t, w in self._window if now - t < 60.0)
 
-    def _acquire(self, weight: int) -> None:
+    def wait_for_capacity(self, weight: int) -> None:
+        """Wait for a consecutive group of calls on this single-threaded port.
+
+        This does not count or reserve calls. Each subsequent call is still
+        acquired normally. The account coordinator is the sole transport caller.
+        """
+        if not 0 < weight <= self.max_per_minute:
+            raise ValueError("request group exceeds rate limit")
         while True:
             now = self._clock.monotonic()
             while self._window and now - self._window[0][0] >= 60.0:
                 self._window.popleft()
-            used = sum(w for _, w in self._window)
-            if used + weight <= self.max_per_minute or not self._window:
-                self._window.append((now, weight))
-                self.peak = max(self.peak, used + weight)
-                self.total_http += weight
+            if sum(w for _, w in self._window) + weight <= self.max_per_minute:
                 return
             wait = 60.0 - (now - self._window[0][0]) + 0.01
             self.total_sleep += wait
             self._clock.sleep(wait)
+
+    def _acquire(self, weight: int) -> None:
+        self.wait_for_capacity(weight)
+        now = self._clock.monotonic()
+        self._window.append((now, weight))
+        self.peak = max(self.peak, sum(w for _, w in self._window))
+        self.total_http += weight
+        key = self.tag or "account"
+        self.by_tag[key] = self.by_tag.get(key, 0) + weight

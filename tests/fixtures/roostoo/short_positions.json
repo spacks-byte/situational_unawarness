@@ -1,0 +1,1 @@
+{"Success": true, "ErrMsg": "", "Positions": [{"ID": 77, "Pair": "BONK/USD", "EntryPrice": 100.0, "ShortQty": 5.0, "Collateral": 500.0, "PositionStatus": "OPEN", "CurrentPrice": 99.0, "UnrealizedPNL": 5.0, "UnrealizedPNLPct": 0.01}]}

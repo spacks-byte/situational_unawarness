@@ -7,6 +7,7 @@ Commands:
   live       run the bot unattended on Roostoo (dry run unless --live)
   replay     simulate the live bot on downloaded candles (no network)
   dashboard  build the trading-desk dashboard (HTML)
+  account    read-only checks of the shared MM/RXM account (preflight, explain)
   api        interactive Roostoo API test menu
 """
 from __future__ import annotations
@@ -56,6 +57,15 @@ def _data_command(args, settings: Settings) -> int:
 
 def _live_overrides(args, settings: Settings) -> Settings:
     live = {k: v for k, v in (("mode", args.mode), ("state_dir", args.state_dir)) if v}
+    if getattr(args, "strategies", None):
+        live["strategies"] = [name.strip() for name in args.strategies.split(",") if name.strip()]
+        names = live["strategies"]
+        if not names or len(names) != len(set(names)) or any(n not in {"rxm", "mm-10m-fluctuation"} for n in names):
+            raise ValueError("--strategies requires unique rxm / mm-10m-fluctuation names")
+        if not settings.market_making.enabled and names != ["rxm"]:
+            raise ValueError("MM/account selection requires --config config/market-making.yaml")
+        if len(names) == 1:
+            live["strategy"] = names[0]
     return settings.model_copy(update={"live": settings.live.model_copy(update=live)}) if live else settings
 
 
@@ -65,14 +75,22 @@ def _live_command(args, settings: Settings) -> int:
     if args.live and os.environ.get("ROOSTOO_CONFIRM_LIVE") != "YES":
         print("--live sends real orders: set ROOSTOO_CONFIRM_LIVE=YES in the environment to confirm", file=sys.stderr)
         return 2
-    settings = _live_overrides(args, settings)
+    try:
+        settings = _live_overrides(args, settings)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
     log_file = Path(settings.live.state_dir) / "bot.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(log_file, maxBytes=20_000_000, backupCount=10, encoding="utf-8")
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
     logging.getLogger().addHandler(handler)
     try:
-        runner = LiveRunner(settings, mode="live" if args.live else "dry-run")
+        if settings.market_making.enabled:
+            from tradebot.live.account import AccountRunner
+            runner = AccountRunner(settings, mode="live" if args.live else "dry-run")
+        else:
+            runner = LiveRunner(settings, mode="live" if args.live else "dry-run")
     except (RuntimeError, ValueError) as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         return 2
@@ -82,9 +100,18 @@ def _live_command(args, settings: Settings) -> int:
 def _replay_command(args, settings: Settings) -> int:
     from tradebot.live.replay import run_replay
 
-    if args.mode:
+    try:
         settings = _live_overrides(args, settings)
-    run_replay(settings, args.start, args.days, args.cash, args.out, keep_state=args.keep_state)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+    if settings.market_making.enabled:
+        from tradebot.live.shared_replay import run_shared_replay
+        if args.mm_cache:
+            settings.market_making.replay_cache_dir = args.mm_cache
+        run_shared_replay(settings, args.start, args.days, args.cash, args.out, keep_state=args.keep_state)
+    else:
+        run_replay(settings, args.start, args.days, args.cash, args.out, keep_state=args.keep_state)
     return 0
 
 
@@ -92,6 +119,32 @@ def _dashboard_command(args, settings: Settings) -> int:
     from tradebot.dashboard.build import main as dashboard_main
 
     return dashboard_main(args.dashboard_args)
+
+
+def _account_command(args, settings: Settings) -> int:
+    import json
+
+    from tradebot.live import preflight as checks
+
+    if args.state_dir:
+        settings.live.state_dir = args.state_dir
+    if args.action == "explain":
+        print(json.dumps(checks.explain(settings.live.state_dir, events=args.events), indent=2, default=str))
+        return 0
+    if not settings.market_making.enabled:
+        print("[ERROR] preflight checks the shared account: pass --config config/market-making.yaml", file=sys.stderr)
+        return 2
+    from tradebot.exchange import RoostooClient, RoostooExchangePort
+    from tradebot.live.runner import account_lock_path
+
+    client = RoostooClient(settings=settings.exchange)
+    if not client.api_key or not client.api_secret:
+        print("[ERROR] Roostoo credentials missing", file=sys.stderr)
+        return 2
+    port = RoostooExchangePort(client)
+    report = checks.preflight(settings, port, lock_path=account_lock_path(settings, port))
+    print(json.dumps(report, indent=2, default=str) if args.json else checks.render(report))
+    return 0 if report["ready"] else 1
 
 
 def _api_command(args, settings: Settings) -> int:
@@ -122,6 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     live = sub.add_parser("live", help="Run the bot unattended on Roostoo (dry run unless --live)")
     live.add_argument("--live", action="store_true",
                       help="send real orders (also needs ROOSTOO_CONFIRM_LIVE=YES); default is a dry run")
+    live.add_argument("--strategies", help="independent account strategies: rxm, mm-10m-fluctuation, or both comma-separated")
     live.add_argument("--mode", help="strategy preset, e.g. comp | neutral (default: config live.mode)")
     live.add_argument("--state-dir", help="journal, logs and status (default: config live.state_dir)")
     live.add_argument("--max-loops", type=int, help="stop after N loops (testing)")
@@ -131,9 +185,11 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--start", default="2026-09-01T00:16", help="UTC start time")
     replay.add_argument("--days", type=float, default=7.0)
     replay.add_argument("--cash", type=float, default=100_000.0)
+    replay.add_argument("--strategies", help="independent account strategies to replay, comma-separated")
     replay.add_argument("--mode", help="strategy preset (default: config live.mode)")
     replay.add_argument("--state-dir", help=argparse.SUPPRESS)
     replay.add_argument("--out", default="results/replay")
+    replay.add_argument("--mm-cache", help="verified shared-backtest 1s cache root for shared-account replay")
     replay.add_argument("--keep-state", action="store_true", help="keep previous state (restart test)")
     replay.set_defaults(handler=_replay_command)
 
@@ -141,6 +197,14 @@ def build_parser() -> argparse.ArgumentParser:
                           add_help=False)
     dash.add_argument("dashboard_args", nargs=argparse.REMAINDER)
     dash.set_defaults(handler=_dashboard_command)
+
+    account = sub.add_parser("account", help="Read-only checks of the shared MM/RXM account (no orders)")
+    account.add_argument("action", choices=["preflight", "explain"],
+                         help="preflight: venue + local state before a takeover; explain: current restrictions from portfolio.db")
+    account.add_argument("--state-dir", help="Shared account state dir (default: live.state_dir)")
+    account.add_argument("--json", action="store_true", help="preflight: print the full JSON report")
+    account.add_argument("--events", type=int, default=20, help="explain: recent journal events to show")
+    account.set_defaults(handler=_account_command)
 
     api = sub.add_parser("api", help="Interactive Roostoo API test menu")
     api.set_defaults(handler=_api_command)

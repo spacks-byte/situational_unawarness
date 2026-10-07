@@ -1,0 +1,51 @@
+# Shared account: 70% combined long-only MM, 30% existing RXM.
+# Only overrides are listed; everything else comes from the model defaults (= config/default.yaml).
+# Use: python -m tradebot --config config/market-making.yaml live ...   (docs/LIVE_RUNBOOK.md)
+# Values carried over from the quant's competition_config.yaml; reasons in docs/LIVE_RUNBOOK.md section 3.
+
+execution:
+  live_mode: false                 # NEVER true here: `tradebot live --live` sets it, with ROOSTOO_CONFIRM_LIVE=YES
+  dry_run: true
+  limit_offset_bps: 5.0            # exits rest 5 bp passive, like every RXM limit
+  strategy_poll_interval_seconds: 60   # API budget: ~5 requests per idle loop
+  fill_timeout_seconds: 900        # passive limits rest ~one 15m bar, then cancelled and re-quoted
+  max_child_order_pct: 0.5         # 0.25 would slice a 0.55 long into 3 children = 3x API calls
+  max_gross_exposure: 1.0          # no leverage (the strategy caps gross at 0.98)
+  max_net_exposure: 1.0
+  max_per_symbol_exposure: 0.60    # k=3 inverse-vol: max single weight 0.552 in 2024-26; 0.40 rejects rebalances
+  min_cash_reserve_usd: 200.0
+  max_total_short_collateral_usd: 100000.0   # 10k would reject every plan with > 10% shorts
+  max_daily_loss_usd: 1.0e9        # no daily-loss brake (brakes reduced value in testing)
+  max_drawdown_pct: 1.0            # no drawdown brake
+  max_order_value_usd: 100000.0    # per-symbol plan amount; a 0.55 weight is $55k
+  max_effective_leverage: 1.0      # reserved (documentation)
+
+live:
+  strategies: [mm-10m-fluctuation, rxm]  # either strategy can be selected alone
+  mode: comp
+  state_dir: var/shared-dry-run         # one directory per account + mode; never reuse a dry-run directory
+  market_store_dir: var/market          # local copy of live candles (1s MM coins, 15m RXM); shared by modes
+  market_store_retention_days: 30
+  market_store_min_free_gb: 1.0         # below this free space the copy pauses; trading continues
+  escalate: true                   # off-target symbols: 5 bp passive, then at the last price, then cross
+  ladder_bps: [5.0, 0.0]           # (buys/sells +-10 bp marketable, short opens market): book complete
+  cross_bps: 10.0                  # ~33 min after the rebalance even if passive limits never fill
+  guard:
+    max_symbol_weight: 0.60        # same cap as the engine (default 0.40 would block RXM's own rebalances)
+    warn_symbol_weight: 0.50
+    max_order_frac_equity: 0.51    # child orders are at most 0.5 of equity
+    max_order_notional_usd: 60000.0
+    lockin_return: 0.0             # the strategy owns the lock-in (2 polls at +6%, saved to disk). A guard
+                                   # latching on one poll could block a book the bot never locked
+
+# One coordinator; startup allocations are percentages of reconciled account equity.
+market_making:
+  enabled: true
+  capital:
+    mm_fraction: 0.70
+  allocations:
+    PEPE: 0.85
+    BONK: 0.075
+    1000CHEEMS: 0.075
+  rxm_state_dir: var/live_comp
+  # account_lock: left unset = per-account lock in the user state dir (shared with standalone RXM)

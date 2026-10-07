@@ -10,7 +10,7 @@ from tradebot.engine.execution.runner import ExecutionRunner
 from tradebot.engine.monitor.position_monitor import PositionMonitor
 from tradebot.exchange.port import ExchangePort
 from tradebot.engine.runtime import EngineRuntime
-from tradebot.engine.schema.models import TargetPortfolio
+from tradebot.engine.schema.models import TargetPortfolio, StrategyOutput
 from tradebot.engine.state.audit_log import AuditLog
 from tradebot.engine.state.intent_store import IntentJournal
 
@@ -28,6 +28,7 @@ class Engine:
         audit_path: str | Path | None = None,
         clock: Clock | None = None,
         monitor: PositionMonitor | None = None,
+        quote_executor=None,
     ) -> None:
         """
         config: explicit ExecutionConfig; otherwise the `execution` section of `config_path`
@@ -53,14 +54,15 @@ class Engine:
             poll_interval_seconds=self.config.strategy_poll_interval_seconds,
             monitor=monitor or PositionMonitor(),
             pending_timeout_seconds=self.config.fill_timeout_seconds,
+            quote_executor=quote_executor,
         )
 
-    def run_once(self, strategy: Callable[[dict[str, Any]], TargetPortfolio]) -> dict[str, Any]:
+    def run_once(self, strategy: Callable[[dict[str, Any]], StrategyOutput]) -> dict[str, Any]:
         return self.runtime.run_once(strategy)
 
     def run(
         self,
-        strategy: Callable[[dict[str, Any]], TargetPortfolio],
+        strategy: Callable[[dict[str, Any]], StrategyOutput],
         *,
         max_iterations: int | None = None,
     ) -> list[dict[str, Any]]:

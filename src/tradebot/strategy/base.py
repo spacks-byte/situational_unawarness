@@ -1,4 +1,4 @@
-from abc import ABC, abstractmethod
+from abc import ABC
 from typing import Dict
 
 import pandas as pd
@@ -8,7 +8,11 @@ class Strategy(ABC):
     """
     Base class for all strategies.
 
-    A strategy turns market data into *target portfolio weights*:
+    Strategies declare output_kind="weights" (default) or "quotes". The engine
+    executes QuoteBatch outputs through its quote executor. Weight outputs retain
+    the existing DataFrame contract described below:
+
+    A weight strategy turns market data into *target portfolio weights*:
       - index:   bar open timestamps (UTC), same as the input data
       - columns: coins (keys of `data`, e.g. "BTC")
       - values:  fraction of total equity in that symbol, between -1 and 1:
@@ -27,7 +31,8 @@ class Strategy(ABC):
     def __init__(self, **params):
         self.params = params
 
-    @abstractmethod
+    output_kind: str = "weights"
+
     def generate_weights(self, data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         """
         Args:
@@ -37,6 +42,17 @@ class Strategy(ABC):
         Returns:
             DataFrame of target weights as described in the class docstring.
         """
+
+        raise NotImplementedError("This strategy outputs quotes, not weights")
+
+    def generate_quotes(self, data, **context):
+        raise NotImplementedError("This strategy outputs weights, not quotes")
+
+    def generate(self, data, **context):
+        """Dispatch explicitly; existing weight strategies retain their DataFrame contract."""
+        if self.output_kind == "quotes":
+            return self.generate_quotes(data, **context)
+        return self.generate_weights(data)
 
     def __repr__(self):
         args = ", ".join(f"{k}={v}" for k, v in self.params.items())

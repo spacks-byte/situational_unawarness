@@ -4,6 +4,13 @@ Team 87's autonomous trading bot for the [Roostoo](https://app.roostoo.com) mock
 
 **The strategy is RXM, residual cross-sectional momentum.** Once a day it goes long the coins with the strongest trend after removing their BTC beta and short the weakest, sized by inverse volatility, with a competition lock-in. The full specification and evidence are in [docs/STRATEGY_SPEC.md](docs/STRATEGY_SPEC.md).
 
+An optional [shared-account market-making profile](docs/MARKET_MAKING.md) allocates
+70% of current equity to the long-only `mm-10m-fluctuation` strategy and 30% to RXM.
+Each strategy is independently selectable with `--strategies`; neither requires
+the other to run. MM uses its own ledger and fixed ten-minute quotes for PEPE, BONK and
+1000CHEEMS. Run `python -m tradebot --config config/market-making.yaml account preflight`
+(read-only) before a takeover; see the doc for migration, replay and dry-run commands.
+
 One Python package, `tradebot`, contains:
 - **Historical data:** Binance spot candles for every Roostoo pair.
 - **A backtester:** it simulates the competition rules (limit orders at 0.05%, 0.1% short fees, 1x shorts, lock-in) and scores strategies on competition-length windows.
@@ -32,13 +39,16 @@ ROOSTOO_CONFIRM_LIVE=YES python -m tradebot --config config/competition.yaml liv
 
 Settings live in [config/default.yaml](config/default.yaml), with competition overrides in [config/competition.yaml](config/competition.yaml). API keys go only in `.env`. Operating the bot: [docs/LIVE_RUNBOOK.md](docs/LIVE_RUNBOOK.md).
 
+The account profile shares one strategy-neutral market-data producer: cached prices
+update every second, while MM and RXM retain their separate decision schedules.
+
 ## Layout
 
 ```
 src/tradebot/
   core/       config, symbols, metrics, clock, logging
   exchange/   Roostoo client, ExchangePort interface, mock and replay exchanges, API menu
-  data/       Binance Vision downloader and loaders
+  data/       shared one-second market-data engine, Binance downloader and loaders
   strategy/   Strategy interface; library: RXM (the competition strategy), MA crossover
   backtest/   limit-order simulator, competition windows, CLI
   research/   RXM experiments and disciplined tuning
@@ -63,6 +73,8 @@ docs/         strategy, operations, architecture, review
 | [DASHBOARD.md](docs/DASHBOARD.md) | The dashboard and the guard's checks |
 | [ENGINE.md](docs/ENGINE.md), [DESIGN.md](docs/DESIGN.md) | The live engine and verified Roostoo behaviour |
 | [ROOSTOO_API.md](docs/ROOSTOO_API.md) | The Roostoo client and the manual API menu |
+| [MARKET_MAKING.md](docs/MARKET_MAKING.md) | Shared MM/RXM account: allocation, reconciliation, preflight and migration |
+| [ACCOUNT_VALIDATION.md](docs/ACCOUNT_VALIDATION.md) | Real-order checks of the shared account on a separate test account |
 
 ## License
 
