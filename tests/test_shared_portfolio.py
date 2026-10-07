@@ -40,23 +40,23 @@ def fill_next(a, sim, clock, price, coin="PEPE"):
 
 def test_allocator_uses_current_equity_and_reserves_both_sides(tmp_path):
     a, sim, clock = setup_account(tmp_path, initial=200_000)
-    assert a.state["rxm_capital"] == 60_000
-    assert a.owner("PEPE")["capital"] == 119_000
-    assert a.owner("BONK")["capital"] == 10_500
+    assert a.state["rxm_capital"] == 20_000
+    assert a.owner("PEPE")["capital"] == 153_000
+    assert a.owner("BONK")["capital"] == 13_500
     o, = prepare(a, clock)
     assert a.reservations(MM)[0] == pytest.approx(990.495)
-    assert a.owner("PEPE")["cash"] == 119_000
+    assert a.owner("PEPE")["cash"] == 153_000
     assert a.submit(o)["Success"]
-    assert a.view_balance("rxm")["SpotWallet"]["USD"]["Free"] == pytest.approx(60_000)
+    assert a.view_balance("rxm")["SpotWallet"]["USD"]["Free"] == pytest.approx(20_000)
     fill_next(a, sim, clock, 98)
     b = a.owner("PEPE")
     assert b["quantity"] == 10
-    assert b["cash"] == pytest.approx(119_000-990.495)
+    assert b["cash"] == pytest.approx(153_000-990.495)
     assert b["fees"] == pytest.approx(.495)
     a.sync()
     assert b["fees"] == pytest.approx(.495)
     assert a.view_balance("rxm")["SpotWallet"]["PEPE"]["Free"] == 0
-    assert a.view_balance("rxm")["SpotWallet"]["USD"]["Free"] == pytest.approx(60_000)
+    assert a.view_balance("rxm")["SpotWallet"]["USD"]["Free"] == pytest.approx(20_000)
 
 
 def test_sell_without_inventory_and_mm_short_calls_are_denied(tmp_path):
@@ -93,7 +93,7 @@ def test_cancel_refund_and_realized_pnl(tmp_path):
     a.submit(o)
     a.cancel(MM, o["order_id"])
     a.sync()
-    assert a.owner("PEPE")["cash"] == 59500
+    assert a.owner("PEPE")["cash"] == 76500
     assert a.reservations(MM)[0] == 0
     o, = prepare(a, clock)
     a.submit(o)
@@ -103,7 +103,7 @@ def test_cancel_refund_and_realized_pnl(tmp_path):
     fill_next(a, sim, clock, 102)
     b = a.owner("PEPE")
     assert b["quantity"] == 0
-    assert b["cash"] == pytest.approx(59519)
+    assert b["cash"] == pytest.approx(76519)
     assert b["fees"] == pytest.approx(1)
     assert b["realized_pnl"] == pytest.approx(19)
     assert a.report()["mm"]["PEPE"]["net_pnl"] == pytest.approx(19)
@@ -141,7 +141,7 @@ def test_partial_fills_cancel_race_and_duplicate_history(tmp_path):
     a.cancel(MM, o["order_id"])
     a.sync()
     assert a.owner("PEPE")["quantity"] == 7
-    assert a.owner("PEPE")["cash"] == pytest.approx(59500-7*99*1.0005)
+    assert a.owner("PEPE")["cash"] == pytest.approx(76500-7*99*1.0005)
     assert a.reservations(MM)[0] == 0
 
 
@@ -217,9 +217,9 @@ def test_rxm_shorts_keep_own_policy_and_cannot_use_mm_cash(tmp_path):
     assert not rxm.open_short("PEPE", 40_000, price=101)["Success"]
     result = rxm.open_short("PEPE", 1010, price=101)
     assert result["Success"]
-    assert a.rxm_free_cash() == pytest.approx(30_000-1011.01)
+    assert a.rxm_free_cash() == pytest.approx(10_000-1011.01)
     rxm.cancel_order(order_id=result["ID"])
-    assert a.rxm_free_cash() == pytest.approx(30_000)
+    assert a.rxm_free_cash() == pytest.approx(10_000)
     assert rxm.open_short("PEPE", 1010, price=101)["Success"]
     fill_next(a, sim, clock, 102)
     assert a.state["short_quantity"]["PEPE/USD"] == 10

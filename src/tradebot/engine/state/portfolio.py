@@ -26,6 +26,7 @@ import uuid
 from tradebot.core import locking
 from tradebot.core.symbols import to_coin, to_pair
 from tradebot.engine.state.restrictions import Restrictions
+from tradebot.telemetry.supabase import SupabaseTradeUploader
 from tradebot.engine.state.snapshot import normalize_exchange_snapshot, remaining_qty
 
 MM = "mm-10m-fluctuation"
@@ -55,14 +56,18 @@ class PortfolioStore:
     accounting explicitly, preserving pending reservations and order history.
     """
 
-    def __init__(self, path, clock):
+    def __init__(self, path, clock, *, trade_uploader=None, environment="live", bot_id="tradebot"):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, timestamp TEXT, kind TEXT, payload TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS completed_orders (intent_id TEXT PRIMARY KEY, order_id TEXT, strategy TEXT, payload TEXT)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS trade_uploads (intent_id TEXT PRIMARY KEY, payload TEXT NOT NULL, uploaded INTEGER NOT NULL DEFAULT 0)")
         self.clock = clock
+        self.trade_uploader = trade_uploader
+        self.environment = environment
+        self.bot_id = bot_id
         row = self.db.execute("SELECT payload FROM portfolio WHERE id=1").fetchone()
         self.state = json.loads(row[0]) if row else None
         if self.state is not None and self.state.get("version") != 1:
@@ -80,6 +85,13 @@ class PortfolioStore:
                     self.db.execute("INSERT OR REPLACE INTO completed_orders VALUES (?,?,?,?)",
                                     (order["intent_id"], order.get("order_id"), order["strategy"],
                                      json.dumps(order, allow_nan=False)))
+                    transaction = (SupabaseTradeUploader.transaction(
+                        order, environment=self.environment, bot_id=self.bot_id)
+                        if self.trade_uploader is not None and self.environment == "live" else None)
+                    if transaction is not None:
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO trade_uploads(intent_id, payload) VALUES (?, ?)",
+                            (order["intent_id"], json.dumps(transaction, allow_nan=False)))
                 self.db.execute("INSERT OR REPLACE INTO portfolio VALUES (1, ?)",
                                 (json.dumps(active_state, allow_nan=False),))
                 self.db.execute("INSERT INTO events(timestamp,kind,payload) VALUES(?,?,?)",
@@ -90,6 +102,16 @@ class PortfolioStore:
             raise
         for order in completed:
             del self.state["orders"][order["intent_id"]]
+
+    def flush_trade_uploads(self):
+        if self.trade_uploader is None:
+            return
+        rows = self.db.execute(
+            "SELECT intent_id, payload FROM trade_uploads WHERE uploaded=0 ORDER BY intent_id").fetchall()
+        for intent_id, payload in rows:
+            self.trade_uploader.upload(json.loads(payload))
+            with self.db:
+                self.db.execute("UPDATE trade_uploads SET uploaded=1 WHERE intent_id=?", (intent_id,))
 
     def completed(self, strategy, order_id=None):
         query = "SELECT payload FROM completed_orders WHERE strategy=?"
@@ -717,6 +739,7 @@ class AccountCoordinator:
                 self.store.save("self_cross_skipped", q.model_dump())
                 continue
             o = self._record(MM, q.symbol, q.side, q.quantity, q.price)
+            o["signal_id"] = batch.signal_id
             self.orders[o["intent_id"]] = o
             prepared.append(o)
         self.store.save("quotes_reserved", {"batch": batch.model_dump(mode="json"),

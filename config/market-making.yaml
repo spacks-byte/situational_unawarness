@@ -1,4 +1,4 @@
-# Shared account: 70% combined long-only MM, 30% existing RXM.
+# Shared account: 90% combined long-only MM, 10% existing RXM.
 # Only overrides are listed; everything else comes from the model defaults (= config/default.yaml).
 # Use: python -m tradebot --config config/market-making.yaml live ...   (docs/LIVE_RUNBOOK.md)
 # Values carried over from the quant's competition_config.yaml; reasons in docs/LIVE_RUNBOOK.md section 3.
@@ -42,7 +42,7 @@ live:
 market_making:
   enabled: true
   capital:
-    mm_fraction: 0.70
+    mm_fraction: 0.90
   allocations:
     PEPE: 0.85
     BONK: 0.075

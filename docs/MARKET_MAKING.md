@@ -95,11 +95,11 @@ coordinator's MM/RXM-specific docstring describes only its current implementatio
 
 ## Capital and positions
 
-On first initialization, the allocator assigns **70% of reconciled account equity
-to MM and 30% to RXM**. This is a percentage of the current account value, not a
+On first initialization, the allocator assigns **90% of reconciled account equity
+to MM and 10% to RXM**. This is a percentage of the current account value, not a
 fixed $100,000 assumption. Within MM, PEPE receives 85%, BONK 7.5%, and 1000CHEEMS
-7.5%. On a $100,000 account the budgets are therefore $59,500, $5,250, $5,250,
-and $30,000 for RXM.
+7.5%. On a $100,000 account the budgets are therefore $76,500, $6,750, $6,750,
+and $10,000 for RXM.
 
 The total MM allocation must be available as unreserved USD. Existing identifiable
 RXM positions and orders remain RXM-owned. If those holdings leave insufficient
@@ -115,6 +115,30 @@ fraction after initialization requires a separate accounting migration; changing
 the file does not transfer money. There are no live 14-day resets or terminal
 liquidations. The RXM start-equity and lock-equity baselines are scaled on migration
 so the capital transfer does not manufacture a return or trigger a lock-in.
+The current profile uses `market_making.capital.mm_fraction: 0.90`; an existing
+`portfolio.db` initialized at 0.70 must be explicitly migrated because the
+coordinator blocks rather than silently moving capital.
+
+Completed orders with at least one confirmed fill are queued in the local
+`portfolio.db` outbox and uploaded to Supabase when `SUPABASE_URL` and
+`SUPABASE_SERVICE_KEY` are present. Rejected orders, canceled orders with zero
+fills, and dry-run orders are not uploaded. Partial fills are uploaded as one
+aggregate transaction for the order.
+
+The supplied table should be altered before enabling this in production so
+strategy ownership is queryable and retries are idempotent:
+
+```sql
+alter table public.trade_transactions
+  add column if not exists strategy text not null default 'unknown';
+
+create unique index if not exists trade_transactions_bot_intent_uidx
+on public.trade_transactions (bot_id, intent_id);
+```
+
+The application writes `strategy` as `mm-10m-fluctuation` or `rxm`. The
+`bot_id` should identify the deployment/account, for example
+`team87-competition-1`, rather than a generic value.
 
 **MM is long-only.** Both short-open and short-close calls are denied for MM.
 A bid requires its coin's cash, including the 5-bps fee reserve. An ask requires
@@ -255,7 +279,7 @@ python -m tradebot --config config/market-making.yaml account preflight   # exit
 python -m tradebot --config config/market-making.yaml account explain     # no network
 ```
 
-`preflight` reports equity, the 70/30 split, the MM funding shortfall, spot and
+`preflight` reports equity, the 90/10 split, the MM funding shortfall, spot and
 short positions (attributed to RXM at takeover), resting orders that are in neither
 the RXM journal nor `portfolio.db`, a held account lock, an active standalone RXM
 runner (recent `status.json` in `rxm_state_dir`), and an existing ledger whose
@@ -275,6 +299,23 @@ Migration from the standalone RXM runner (operator steps; nothing is automatic):
    never delete `portfolio.db`. To roll back, stop the coordinator and restart the
    old runner on its untouched state directory; positions stay where they are.
 
+If the existing standalone RXM book should be fully closed before migration, use
+the execution-only operator script below with the old runner stopped. It cancels
+resting orders, closes shorts, sells all non-USD spot balances at market, and
+reconciles for a bounded number of rounds. It requires
+`ROOSTOO_CONFIRM_LIVE=YES`, acquires the account lock, and returns failure unless
+the account has no open orders, shorts, or non-USD spot balances:
+
+```bash
+ROOSTOO_CONFIRM_LIVE=YES python scripts/liquidate_account.py \
+  --config config/market-making.yaml \
+  --state-dir var/live_comp
+```
+
+This script does not alter `var/live_comp` and does not start the replacement
+strategy. Review the exchange fills and run `account preflight` after it
+finishes; liquidation is a prerequisite, not a substitute for reconciliation.
+
 Read-only dry run (including blocked order and cancellation transport):
 
 ```bash
@@ -285,7 +326,7 @@ PYTHONPATH=src python3 -m tradebot --config config/market-making.yaml live \
 Selection examples (use the same account state directory when changing the active roster):
 
 ```bash
-# RXM only, on its allocated 30%.
+# RXM only, on its allocated 10%.
 PYTHONPATH=src python3 -m tradebot --config config/market-making.yaml live --strategies rxm
 # Both independently, on their respective allocations.
 PYTHONPATH=src python3 -m tradebot --config config/market-making.yaml live --strategies mm-10m-fluctuation,rxm
@@ -300,7 +341,7 @@ ROOSTOO_CONFIRM_LIVE=YES PYTHONPATH=src python3 -m tradebot \
 
 No live launch is performed by implementing or testing this change. Dry-run state
 cannot be reused for execution. Preserve the execution state directory on restart.
-The allocator is configured by `market_making.capital.mm_fraction: 0.70`; RXM gets
+The allocator is configured by `market_making.capital.mm_fraction: 0.90`; RXM gets
 the remainder. There is no required dollar-budget CLI flag.
 
 Control files inside the shared state directory:

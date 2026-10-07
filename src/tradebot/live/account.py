@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import logging
+import os
 from pathlib import Path
 import signal
 import sqlite3
@@ -22,6 +23,7 @@ from tradebot.live.runner import LiveRunner, _universe, _write_json, account_loc
 from tradebot.live.throttle import ThrottledPort
 from tradebot.strategy.library.mm_fluctuation import MMFluctuation
 from tradebot.strategy.registry import STRATEGIES
+from tradebot.telemetry.supabase import SupabaseTradeUploader
 
 log = logging.getLogger(__name__)
 
@@ -117,7 +119,14 @@ class AccountRunner:
             if mode == "live" and not getattr(port, "is_live", False):
                 raise ValueError("live requires real exchange transport")
             self.throttled = ThrottledPort(port, self.clock, max_per_minute=settings.live.max_http_per_minute)
-            self.store = PortfolioStore(self.state_dir / "portfolio.db", self.clock)
+            uploader = SupabaseTradeUploader()
+            if not uploader.enabled:
+                log.warning("Supabase trade upload disabled: SUPABASE_URL or SUPABASE_SERVICE_KEY is missing")
+            self.store = PortfolioStore(
+                self.state_dir / "portfolio.db", self.clock, trade_uploader=uploader,
+                environment="live" if mode == "live" else "dry_run",
+                bot_id=os.getenv("TRADEBOT_BOT_ID", "tradebot"),
+            )
             self.account = AccountCoordinator(self.throttled, self.store, settings.market_making, settings.fees,
                                               self.clock, dry_run=mode == "dry-run",
                                               import_order_ids=legacy_ids(settings.market_making.rxm_state_dir), paused=self.risk_paused)
@@ -258,6 +267,10 @@ class AccountRunner:
                         self.throttled.tag = None
                 if self.account.dirty:          # only re-read the venue if something was sent/cancelled
                     self.account.sync()
+                try:
+                    self.store.flush_trade_uploads()
+                except Exception:
+                    log.exception("Supabase trade upload failed; local outbox retained for retry")
                 status = "PARTIAL" if any(r.get("status") in {"ERROR", "BACKOFF"} for r in strategy_results.values()) else "OK"
                 result = {"status": status, "strategies": strategy_results}
             self.failures, self.last_error = 0, None

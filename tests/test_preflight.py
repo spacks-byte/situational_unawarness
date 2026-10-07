@@ -31,8 +31,8 @@ def test_fresh_account_is_ready_and_nothing_is_written(tmp_path):
     sim, clock = _venue(tmp_path)
     report = preflight(settings, sim, lock_path=tmp_path / "lock", now=clock.now())
     assert report["ready"], report["blockers"]
-    assert report["allocation"]["mm_required_usd"] == pytest.approx(70_000)
-    assert report["allocation"]["rxm_capital_usd"] == pytest.approx(30_000)
+    assert report["allocation"]["mm_required_usd"] == pytest.approx(90_000)
+    assert report["allocation"]["rxm_capital_usd"] == pytest.approx(10_000)
     assert not MUTATING & set(sim.calls)
     assert not (tmp_path / "shared").exists() and not (tmp_path / "lock").exists()
 
@@ -78,7 +78,7 @@ def test_existing_ledger_with_changed_allocation_needs_migration(tmp_path):
     settings.live.state_dir = str(tmp_path / "shared-src")
     settings.market_making.capital.mm_fraction = 0.6
     report = preflight(settings, sim, lock_path=tmp_path / "lock", now=clock.now())
-    assert report["existing_ledger"]["capital_fraction"] == 0.7
+    assert report["existing_ledger"]["capital_fraction"] == 0.9
     assert any("explicit migration" in b for b in report["blockers"])
 
 

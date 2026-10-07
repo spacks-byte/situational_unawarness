@@ -186,7 +186,7 @@ class LiveConfig(_Section):
 
 class CapitalAllocation(_Section):
     """Fractions of reconciled equity at first initialization; persisted thereafter."""
-    mm_fraction: float = Field(default=0.70, gt=0, lt=1, allow_inf_nan=False)
+    mm_fraction: float = Field(default=0.90, gt=0, lt=1, allow_inf_nan=False)
 
     @property
     def rxm_fraction(self) -> float:

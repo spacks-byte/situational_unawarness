@@ -47,7 +47,7 @@ def test_shared_coordinator_rxm_and_mm_through_actual_engine(tmp_path):
         report = runner.account.report()
         assert sum(b["equity"] for b in report["mm"].values())+report["rxm"]["equity_usd"] == pytest.approx(sim.equity(), abs=.02)
         assert all(b["quantity"] >= 0 for b in report["mm"].values())
-        assert report["rxm_capital"] == 30_000
+        assert report["rxm_capital"] == 10_000
         assert all(o["side"] in {"BUY", "SELL"} for o in runner.store.completed(MM))
     finally:
         runner.close()
@@ -70,7 +70,7 @@ def test_engine_keeps_quotes_fixed_midinterval_and_restart_preserves_anchor(tmp_
         assert result["status"] == "OK", result
         assert result["strategies"][MM]["status"] == "HOLD"
         assert restart.account.state["features"] == features
-        assert restart.account.state["rxm_capital"] == 30_000
+        assert restart.account.state["rxm_capital"] == 10_000
     finally:
         restart.close()
 
@@ -111,10 +111,10 @@ def test_bootstrap_transfer_preserves_rxm_return_and_lock_state(tmp_path):
                                                             "locked": True, "lock_equity": 101_000}))
     runner, sim, clock = shared(tmp_path)
     try:
-        assert runner.runtimes["rxm"].strategy.state.get("start_equity") == pytest.approx(28_500)
-        assert runner.runtimes["rxm"].strategy.state.get("lock_equity") == pytest.approx(30_300)
+        assert runner.runtimes["rxm"].strategy.state.get("start_equity") == pytest.approx(9_500)
+        assert runner.runtimes["rxm"].strategy.state.get("lock_equity") == pytest.approx(10_100)
         assert runner.runtimes["rxm"].strategy.locked
-        assert (30_000/28_500-1) == pytest.approx(100_000/95_000-1)
+        assert (10_000/9_500-1) == pytest.approx(100_000/95_000-1)
     finally:
         runner.close()
 
@@ -154,8 +154,8 @@ def test_each_strategy_can_run_alone_with_its_own_budget(tmp_path, name):
             assert result["status"] == "OK", result
             assert set(result["strategies"]) == {name}
             clock.advance(60)
-        assert runner.account.state["rxm_capital"] == 30_000
-        assert sum(b["capital"] for b in runner.account.state["mm"].values()) == 70_000
+        assert runner.account.state["rxm_capital"] == 10_000
+        assert sum(b["capital"] for b in runner.account.state["mm"].values()) == 90_000
         other = "rxm" if name == MM else MM
         assert not runner.account.active(other)
         assert not runner.store.completed(other)
