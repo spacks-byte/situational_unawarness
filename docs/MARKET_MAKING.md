@@ -162,6 +162,22 @@ Live candles arrive a little after their second ends, so the quote bridge decide
 "last complete second + 1 s" when that is at most `max_data_delay_seconds` (5 s)
 behind the wall clock; with fresh data (always in replay) it decides at the wall clock.
 
+For midpoint experiments, set `market_making.reference_source: midpoint`. The
+quote bridge then reads the latest Binance best bid/ask snapshot after fetching
+candles and uses `(bid + ask) / 2` for quote prices and inventory capacity.
+Volatility, alpha, startup anchor and fixed lot remain candle-based. Book freshness
+is measured against wall time even when candle features are delayed. Missing,
+crossed, locked, future-dated or stale books suppress quotes; there is no candle
+fallback. `max_book_age_seconds` defaults to 2 seconds. Candle-only replays retain
+the default `reference_source: candle_close`; midpoint historical replays require
+recorded best bid/ask observations and cannot recover them from candle OHLC.
+
+`market_making.enforce_one_tick_distance` defaults to `true`. Set it to `false`
+to remove the full-tick minimum distance from the reference while retaining the
+2-bps minimum distance, outward tick rounding and existing fee/spread filters.
+This option does not change the backtest fill-penetration assumption. These are
+opt-in experiment settings; the deployed configuration has not been switched.
+
 Every 600 seconds the engine cancels MM-owned limits by ID, reconciles final fills,
 then calculates replacements. It reserves both sides before submission, without
 using anticipated sale proceeds. Prices and sizes stay fixed between refreshes;

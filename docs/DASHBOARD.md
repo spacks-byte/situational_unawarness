@@ -18,11 +18,19 @@ place orders or write to Supabase. Do not expose this local server through a pub
 
 ### Research
 
-- Choose **RXM** (competition / neutral presets) or **MA crossover**, capital,
-  inclusive start and exclusive end in UTC, symbols, candle interval, strategy
-  parameters, fees, limit offset, rebalance band and lock-in settings. The
-  quote-based MM strategy is available in live monitoring; it needs its own
-  simulator adapter before it can be offered as a backtest in this UI.
+- Choose **RXM** (competition / neutral presets), **MA crossover**, or
+  **MM fluctuation**, capital, and inclusive start / exclusive end in UTC.
+  RXM/MA expose symbols, candle interval, weights and execution controls.
+  MM has an editable symbol universe with allocation fields generated for each
+  ticker. New symbols start at 0%; allocations must total 100%. Zero-weight
+  symbols are skipped, including history/rule loading. MM uses fixed one-second
+  candles and exposes symbol allocations, refresh,
+  warm-up, feature lag, fixed lots, inventory cap, one-tick distance,
+  penetration ticks/probability/seed and optional terminal liquidation.
+  Market slippage is available for every strategy. MM's maker fee is frozen
+  at 5 bps; all entered capital goes to independent MM books.
+  See [MM backtesting](BACKTESTING.md#independent-mm-backtests) for data sources,
+  saved instrument rules, assumptions and equivalent CLI/configuration settings.
 - Runs use the existing `run_backtest` implementation. RXM receives 45 days of
   warm-up; MA receives enough bars for its slow average. Missing candles fail
   the run explicitly instead of silently shrinking the universe. Periods are
@@ -42,13 +50,17 @@ place orders or write to Supabase. Do not expose this local server through a pub
   because OHLC candles do not reveal the exact intrabar fill time.
 - **Quotes CSV** exports all submitted limit orders (including unfilled orders),
   original limit price, fill outcome, execution price and expiry. Quotes expire
-  after one bar. **Trades CSV** exports executed orders only, including market
+  after one bar for RXM/MA. MM exports lifecycle IDs, posting/expiry/fill times,
+  posting tick, assigned penetration and terminal status. **Trades CSV** exports executed orders only, including market
   covers, quantities, prices and fees. CSVs contain full-resolution rows even
   when long price/equity curves are reduced for display. Quantities follow the
-  simulator's notional sizing, without exchange lot-size rounding.
+  weight simulator's notional sizing for RXM/MA; MM uses saved Roostoo precision
+  and minimum-order rules. Terminal MM exits are included in trades.
 - One backtest runs at a time. The five most recent results/exports remain in
   server memory until eviction or restart. Reloading the page resumes the latest
-  run for that browser tab.
+  run for that browser tab. Completed results and exports are also persisted to
+  `<backtest.results_dir>/dashboard/<job-id>/` with effective configuration and
+  MM data/rule provenance.
 
 ### Live tables and comparison
 

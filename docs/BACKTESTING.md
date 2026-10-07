@@ -1,9 +1,9 @@
 # Backtesting
 
-Backtests run on one year of Binance spot candles: 5m and 15m bars for all Roostoo pairs, 2025-10-01 to 2026-09-30. The simulation follows the competition rules:
+Weight-strategy backtests use the configured Binance spot history. The original research dataset contains 5m and 15m bars for all Roostoo pairs, 2025-10-01 to 2026-09-30. The simulation follows the competition rules:
 
 - **$100,000** starting portfolio.
-- **Limit orders only,** with a **0.05%** maker fee.
+- **Limit entries and spot exits**, with a **0.05%** maker fee; short covers execute at market.
 - Long and short positions at **1x** (no leverage).
 - Results are scored on **return, Sharpe, Sortino and Calmar**.
 
@@ -32,6 +32,108 @@ Main options:
 | `--windows` | off | Score many 7-day periods instead of one full year (see below) |
 
 A full-year run prints a metrics table next to an equal-weight buy-and-hold benchmark. It saves `equity.csv`, `trades.csv` and `summary.json` under `results/`.
+
+## Independent MM backtests
+
+`mm-10m-fluctuation` uses `MMFluctuation.generate_quotes` with persistent EWMA
+features, a frozen startup anchor and fixed lots. All starting capital goes to
+separate long-only symbol books (PEPE/BONK/1000CHEEMS at 85% / 7.5% / 7.5%
+by default). Change the universe using the dashboard Symbol universe field or
+CLI `--allocations`, with up to 50 symbols. Allocations may be zero and must
+total 100%; zero-weight symbols are disabled and require no history or
+instrument rules. Active symbols require available history and Roostoo rules.
+The live shared-account 90/10 allocation and live state files are not used.
+The existing `replay --shared` command is unchanged; combined MM/RXM simulation
+is outside this independent backtest.
+
+```bash
+python -m tradebot backtest --strategy mm-10m-fluctuation \
+  --start 2026-09-21 --end 2026-10-05 --cash 100000 \
+  --archive-cache ../shared-backtest/data \
+  --instrument-rules-path path/to/saved-exchange-info.json \
+  --no-download-missing
+
+# Execution stress and optional final inventory exit:
+python -m tradebot backtest --strategy mm-10m-fluctuation \
+  --start 2026-09-21 --end 2026-10-05 \
+  --penetration-ticks 1 --penetration-probability .5 --random-seed 42 \
+  --market-slippage-bps 10 --liquidate-mm
+```
+
+MM requires explicit start/end times and the fixed `1s` interval. Start is
+inclusive; end is exclusive. Current-rule snapshots are historical assumptions,
+not reconstructed historical Roostoo rules. Set `backtest.instrument_rules_path`
+to saved exchangeInfo JSON. If necessary, the loader fetches **only public,
+read-only exchangeInfo** and saves a snapshot. No credentials or trading client
+are required. `backtest.instrument_rules` can override individual pair fields,
+for example `PEPE/USD: {PricePrecision: 8}`. Missing or invalid precision,
+minimum-notional or tradability rules produce an actionable error.
+
+| CLI flag | Default | Behavior |
+|---|---|---|
+| `--allocations` | `PEPE=.85,BONK=.075,1000CHEEMS=.075` | Nonnegative fractions totaling 1; keys set the MM universe |
+| `--refresh-seconds` | 600 | Sync older fills, cancel, release reservations, replace quotes |
+| `--mm-warmup-seconds` | 3600 | Observed seconds before trading |
+| `--feature-lag-seconds` | 1 | Additional completed-candle feature lag, smaller than warm-up |
+| `--lot-fraction` | .05 | Fixed fraction of starting symbol capital at startup anchor |
+| `--inventory-fraction` | .70 | Long inventory capacity, valued at latest completed close |
+| `--no-one-tick-distance` | not set | Disable the existing minimum one-tick quote distance |
+| `--penetration-ticks` | 0 | Additional ticks below bids / above asks required for filling |
+| `--penetration-probability` | 1 | Probability each side requires that penetration; otherwise touch |
+| `--random-seed` | 0 | Native SplitMix64, keyed by seed, absolute posting second and side |
+| `--market-slippage-bps` | 0 | Adverse market price adjustment; also applies to RXM/MA covers |
+| `--liquidate-mm` | off | Cancel quotes and sell inventory at final close, with slippage and taker fee |
+| `--archive-cache` | configured roots | Repeat for fallback roots, including optional shared-backtest data |
+| `--candle-store-dir` | `var/market` | Read local one-second candle-store files |
+| `--no-download-missing` | downloads enabled | Require cached candles and saved/overridden rules |
+
+The frozen MM maker fee is 5 bps, including reservations and spread acceptance.
+The taker fee comes from `fees.spot_taker` (10 bps by default). Bids reserve cash
+including fees; asks reserve already-owned inventory. Sale proceeds cannot fund
+simultaneously posted bids. A posted side fills once, in full, at its quote price
+when a trade-containing second reaches its assigned threshold. The threshold
+uses the posting tick and native comparison tolerance; its random assignment is
+retained until fill/cancellation and shared across coins for the same second/side.
+There is no queue, partial-fill, impact or price-improvement model. Market
+slippage never changes limit executions; forced short liquidation losses remain
+capped at posted collateral. Midpoint reference requests are rejected without
+recorded historical bid/ask observations.
+
+History is processed in daily chunks. Configured verified binary archives are
+checked first, then local candle stores / klines / normalized caches, then Binance
+monthly/daily archives. Only recent unpublished archive tails (last three days)
+fall back to REST. Missing, duplicate, malformed or corrupt seconds are never
+interpolated. Errors identify symbol and period, including warm-up. The optional
+sibling shared-backtest cache is not assumed to exist or cover any requested day.
+
+MM saves full-resolution `equity.csv`, all posted quotes and terminal statuses in
+`quotes.csv`, executed fills (including optional terminal exits) in `trades.csv`,
+and effective configuration, source hashes, rules, assumptions and metrics in
+`summary.json`. Quote IDs are symbol-scoped. Quote posting/expiry/resolution times
+are explicit; fill times label candle closes, not known intrasecond timestamps.
+Equity labels candle opens to group the last second with its own UTC day.
+Terminal costs replace the last equity point, avoiding an extra daily observation.
+Drawdown uses every second before display downsampling. CLI `--windows` currently
+applies to weight strategies; use explicit MM periods.
+
+**TODO — Superday data-source integration:** add Superday as another one-second
+archive provider through `SecondHistory`'s normalized UTC OHLC/volume/trades
+interface and the same strict validation/provenance contract. Connector code,
+credentials, provider-specific schemas and source-precedence decisions are
+deferred until that integration is requested.
+
+### Verification of the MM implementation
+
+The cached 2026-09-21 through 2026-10-05 three-symbol baseline, using saved Roostoo
+rules and $100,000, produced 11,535 quotes, 8,931 fills, $8,335.79 maker fees and
+$121,275.55 final marked equity. CLI and browser-submitted dashboard results
+matched quote/fill exports and all shared metrics exactly across 1,209,600
+one-second equity observations. These are candle-proxy simulation results.
+`tests/test_mm_backtest.py` covers execution stress, accounting, chunk boundaries,
+data errors and exports. `scripts/validate_mm_policy.py` matched 144 native
+quote decisions per coin using identical input features and starting books;
+`tests/fixtures/mm_execution_native.json` records native 3-tick, 50%-probability
+SplitMix64 assignments for seeds 0/17/123 and absolute posting seconds.
 
 ## Competition windows (`--windows`)
 

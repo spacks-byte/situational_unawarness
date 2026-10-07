@@ -15,7 +15,7 @@ from pathlib import Path
 
 from tradebot.backtest.simulator import buy_and_hold, run_backtest
 from tradebot.backtest.windows import evaluate_windows, summarize_windows
-from tradebot.core.config import Settings
+from tradebot.core.config import Settings, BacktestMMConfig
 from tradebot.core.metrics import compute_metrics
 from tradebot.data.loader import load_universe
 from tradebot.strategy.registry import STRATEGIES
@@ -25,6 +25,15 @@ PERCENT_KEYS = {"total_return", "annual_return", "annual_volatility", "max_drawd
 
 # CLI flag -> (config section, field)
 OVERRIDES = {
+    "market_slippage_bps": ("backtest", "market_slippage_bps"),
+    "penetration_ticks": ("backtest", "penetration_ticks"),
+    "penetration_probability": ("backtest", "penetration_probability"),
+    "random_seed": ("backtest", "random_seed"),
+    "liquidate_mm": ("backtest", "liquidate_mm"),
+    "instrument_rules_path": ("backtest", "instrument_rules_path"),
+    "archive_cache_dirs": ("backtest", "archive_cache_dirs"),
+    "candle_store_dir": ("backtest", "candle_store_dir"),
+    "download_missing": ("backtest", "download_missing"),
     "cash": ("backtest", "initial_cash"),
     "limit_offset_bps": ("backtest", "limit_offset_bps"),
     "limit_fill": ("backtest", "limit_fill"),
@@ -79,6 +88,23 @@ def add_parser(subparsers) -> None:
     p.add_argument("--step-days", type=int)
     p.add_argument("--warmup-days", type=int)
     p.add_argument("--no-save", action="store_true", help="Don't write results to disk")
+    p.add_argument('--market-slippage-bps', type=float)
+    p.add_argument('--penetration-ticks', type=int)
+    p.add_argument('--penetration-probability', type=float)
+    p.add_argument('--random-seed', type=int)
+    p.add_argument('--liquidate-mm', action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument('--allocations', help='Symbol fractions summing to 1; zero disables a symbol, e.g. BTC=.6,ETH=.4,PEPE=0')
+    p.add_argument('--refresh-seconds', type=int)
+    p.add_argument('--mm-warmup-seconds', type=int)
+    p.add_argument('--feature-lag-seconds', type=int)
+    p.add_argument('--lot-fraction', type=float)
+    p.add_argument('--inventory-fraction', type=float)
+    p.add_argument('--one-tick-distance', action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument('--reference-source', choices=['candle_close','midpoint'])
+    p.add_argument('--instrument-rules-path', help='Saved Roostoo exchangeInfo JSON; config instrument_rules overrides individual pairs')
+    p.add_argument('--archive-cache', dest='archive_cache_dirs', action='append', help='Verified archive root; repeat for fallback roots')
+    p.add_argument('--candle-store-dir')
+    p.add_argument('--download-missing', action=argparse.BooleanOptionalAction, default=None)
     p.set_defaults(handler=run)
 
 
@@ -123,6 +149,8 @@ def _print_windows(windows, window_days: int) -> None:
 def run(args, settings: Settings) -> int:
     settings = _apply_overrides(settings, args)
     config = settings.backtest
+    if STRATEGIES[args.strategy].output_kind == 'quotes':
+        return run_mm(args, settings)
     strategy = STRATEGIES[args.strategy](**parse_params(args.params))
     symbols = [s.strip() for s in args.symbols.split(",")] if args.symbols else config.symbols
 
@@ -163,4 +191,59 @@ def run(args, settings: Settings) -> int:
     if not args.no_save:
         (out / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
         print(f"\nSaved to {out}")
+    return 0
+
+
+def run_mm(args, settings):
+    from tradebot.backtest.history import SecondHistory, instrument_rules, utc
+    from tradebot.core.metrics import daily_returns
+    config = settings.backtest.model_copy(deep=True)
+    if args.windows:
+        raise ValueError('Independent MM currently takes an explicit --start/--end period; shared-replay remains available separately.')
+    if not args.start or not args.end:
+        raise ValueError('MM requires --start and --end (UTC, end exclusive).')
+    if args.interval and args.interval != '1s':
+        raise ValueError('MM requires --interval 1s.')
+    start, end = utc(args.start), utc(args.end)
+    import pandas as pd
+    if end <= start or start != start.floor('s') or end != end.floor('s') or end > pd.Timestamp.now(tz='UTC').floor('s'):
+        raise ValueError('MM needs integral UTC seconds and a positive period ending before the latest completed candle.')
+    params = config.mm.model_dump() | parse_params(args.params)
+    for flag, key in [('refresh_seconds','refresh_seconds'),('mm_warmup_seconds','warmup_seconds'),
+                      ('feature_lag_seconds','feature_lag_seconds'),('lot_fraction','lot_fraction'),
+                      ('inventory_fraction','inventory_fraction'),('one_tick_distance','enforce_one_tick_distance'),
+                      ('reference_source','reference_source')]:
+        if getattr(args,flag,None) is not None:
+            params[key] = getattr(args,flag)
+    if args.allocations:
+        params['allocations'] = parse_params(args.allocations)
+    config.mm = BacktestMMConfig.model_validate(params)
+    symbols = config.mm.active_symbols
+    if args.symbols and set(s.strip().upper().removesuffix('/USDT').removesuffix('/USD') for s in args.symbols.split(',')) != set(config.mm.allocations):
+        raise ValueError('MM symbols must match the allocation keys; use --allocations to set the universe and weights.')
+    if args.maker_fee is not None and args.maker_fee != .0005:
+        raise ValueError('MM maker fee is frozen at .0005 (5 bps).')
+    rules, rule_info = instrument_rules(config,symbols,settings.exchange.base_url)
+    history = SecondHistory(config,settings.data.dir)
+    chunks = history.chunks(symbols,start,end,config.mm.warmup_seconds,print)
+    result = run_backtest(STRATEGIES[args.strategy](config.mm),chunks,'1s',config,trade_start=start,rules=rules,progress=print)
+    result.metadata.update(data_provenance=history.provenance,rule_provenance=rule_info)
+    metrics = compute_metrics(result.equity,'1s',result.trades,result.exposure,result.net_exposure,initial=config.initial_cash)
+    metrics.update(num_orders=len(result.quotes)+int((result.trades.order_type=='MARKET').sum()),
+                   fill_rate=float(result.quotes.filled.mean()) if len(result.quotes) else None,
+                   daily_observations=len(daily_returns(result.equity, config.initial_cash)))
+    for key,value in metrics.items():
+        print(f'{key}: {_fmt(key,value)}')
+    if not args.no_save:
+        import uuid
+        out = Path(config.results_dir) / f'{args.strategy}_1s_{datetime.now():%Y%m%d-%H%M%S}_{uuid.uuid4().hex[:6]}'
+        out.mkdir(parents=True,exist_ok=False)
+        result.equity.to_frame().join(result.exposure).join(result.net_exposure).to_csv(out/'equity.csv')
+        result.quotes.to_csv(out/'quotes.csv',index=False)
+        result.trades.to_csv(out/'trades.csv',index=False)
+        import math
+        json_metrics = {k: None if isinstance(v, float) and not math.isfinite(v) else v for k,v in metrics.items()}
+        summary = dict(strategy=args.strategy,start=start.isoformat(),end=end.isoformat(),metrics=json_metrics,**result.metadata)
+        (out/'summary.json').write_text(json.dumps(summary,indent=2,default=str,allow_nan=False))
+        print(f'Saved to {out}')
     return 0

@@ -176,11 +176,49 @@ async function refreshLive(){
     if(!state.live){$('strategy-pnl-rows').innerHTML='<tr><td colspan="6" class="table-empty">Unable to load strategy P&L. Use Refresh to retry.</td></tr>';$('position-rows').innerHTML='<tr><td colspan="7" class="table-empty">Unable to load positions. Use Refresh to retry.</td></tr>';$('order-rows').innerHTML='<tr><td colspan="10" class="table-empty">Unable to load orders. Use Refresh to retry.</td></tr>';}
   }finally{refreshing=false;$('refresh').disabled=false;}
 }
+let mmSymbolsText='PEPE, BONK, 1000CHEEMS';
+const mmAllocations=new Map([['PEPE','85'],['BONK','7.5'],['1000CHEEMS','7.5']]);
+function updateMMAllocationTotal(){
+  const total=[...$('mm-allocations').querySelectorAll('input')].reduce((sum,input)=>sum+Number(input.value),0);
+  $('mm-allocation-total').textContent=`Total: ${fmt(total,4)}% / 100%. New symbols start at 0%.`;
+}
+function renderMMAllocations(){
+  const symbols=[...new Set($('symbols').value.split(',').map(s=>s.trim().toUpperCase().replace(/\/(USDT|USD)$/,'')).filter(Boolean))];
+  const valid=symbols.length>0 && symbols.length<=50 && symbols.every(s=>/^[A-Z0-9]{1,25}$/.test(s));
+  $('symbols').setCustomValidity(valid?'':'Enter 1 to 50 coin tickers, separated by commas, e.g. BTC, ETH, PEPE.');
+  $('mm-allocations').replaceChildren();
+  for(const symbol of symbols.filter(s=>/^[A-Z0-9]{1,25}$/.test(s)).slice(0,50)){
+    const label=document.createElement('label');label.textContent=`${symbol} allocation · %`;
+    const input=document.createElement('input');
+    Object.assign(input,{name:`allocation_${symbol}`,type:'number',min:'0',max:'100',step:'any',required:true,value:mmAllocations.get(symbol)??'0'});
+    input.addEventListener('input',()=>{mmAllocations.set(symbol,input.value);updateMMAllocationTotal();});
+    label.append(input);$('mm-allocations').append(label);
+  }
+  updateMMAllocationTotal();
+}
+$('symbols').addEventListener('input',()=>{
+  if($('strategy').value==='mm-10m-fluctuation'){
+    mmSymbolsText=$('symbols').value;renderMMAllocations();
+  }
+});
 function changeStrategy(){
-  const rxm=$('strategy').value==='rxm';$('rxm-fields').hidden=!rxm;$('rxm-preset').hidden=!rxm;$('ma-fields').hidden=rxm;
+  const rxm=$('strategy').value==='rxm', mm=$('strategy').value==='mm-10m-fluctuation';
+  $('rxm-fields').hidden=!rxm;$('rxm-preset').hidden=!rxm;$('ma-fields').hidden=rxm||mm;
+  $('mm-fields').hidden=!mm;$('weight-parameters').hidden=mm;$('weight-execution-note').hidden=mm;
   document.querySelectorAll('#rxm-fields input, #rxm-preset select').forEach(input=>input.disabled=!rxm);
-  document.querySelectorAll('#ma-fields input').forEach(input=>input.disabled=rxm);
-  $('symbols').value=(rxm?state.config.rxm_symbols:state.config.defaults).join(', ');
+  document.querySelectorAll('#ma-fields input').forEach(input=>input.disabled=rxm||mm);
+  document.querySelectorAll('#mm-fields input').forEach(input=>input.disabled=!mm);
+  for(const name of ['limit_offset_bps','short_fee_bps','rebalance_band','lockin_return','lockin_scale']){
+    const input=document.querySelector(`[name=${name}]`);input.disabled=mm;input.closest('label').hidden=mm;
+  }
+  const interval=document.querySelector('[name=interval]');
+  for(const option of interval.options)option.disabled=mm?option.value!=='1s':option.value==='1s';
+  interval.value=mm?'1s':'15m';
+  const maker=document.querySelector('[name=maker_fee_bps]');maker.readOnly=mm;if(mm)maker.value=5;
+  $('symbols').value=mm?mmSymbolsText:(rxm?state.config.rxm_symbols:state.config.defaults).join(', ');
+  $('symbols').setCustomValidity('');
+  if(mm)renderMMAllocations();
+  $('symbol-help').textContent=mm?'Edit coin tickers, separated by commas, then set allocations below. Symbols at 0% are skipped.':'Coin tickers, separated by commas. RXM includes BTC as its benchmark.';
   document.querySelector('[name=lockin_return]').value=rxm?.06:0;
 }
 $('preset').addEventListener('change',()=>{
@@ -205,6 +243,15 @@ $('backtest-form').addEventListener('submit',async e=>{
   e.preventDefault();if(!state.config)return;
   const data=Object.fromEntries(new FormData(e.target));data.symbols=data.symbols.split(',').map(s=>s.trim()).filter(Boolean);data.allow_short=e.target.elements.allow_short.checked;
   for(const [name,value] of Object.entries(data))if(!['strategy','preset','start','end','interval','symbols','allow_short'].includes(name))data[name]=Number(value);
+  if(data.strategy==='mm-10m-fluctuation'){
+    data.mm={allocations:{}};
+    for(const [name,value] of Object.entries(data)){
+      if(name.startsWith('allocation_')){data.mm.allocations[name.slice(11)]=value/100;delete data[name];}
+      else if(name.startsWith('mm_')){data.mm[name.slice(3)]=value;delete data[name];}
+    }
+    data.mm.enforce_one_tick_distance=e.target.elements.mm_enforce_one_tick_distance.checked;
+    data.liquidate_mm=e.target.elements.liquidate_mm.checked;
+  }
   $('run').disabled=true;$('run-status').className='';$('run-status').textContent='Starting backtest…';
   try{
     const job=await api('/api/backtests',{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Token':state.config.csrf},body:JSON.stringify(data)});

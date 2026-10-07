@@ -23,6 +23,7 @@ from tradebot.strategy.library.rxm import UNIVERSE
 class Dashboard:
     def __init__(self, settings=None, ledger=None, market=None):
         settings = settings or Settings.load()
+        self.settings = settings
         self.ledger = ledger or SupabaseLedger()
         self.market = market or BinanceData(settings.data.dir)
         self.csrf = secrets.token_urlsafe(32)
@@ -48,7 +49,12 @@ class Dashboard:
                 self.jobs[job_id].update(status='running', progress=message)
         try:
             update('Loading Binance candles')
-            result, exports = perform_backtest(request, self.market, update)
+            result, exports = perform_backtest(request, self.market, update, self.settings)
+            out = Path(self.settings.backtest.results_dir) / 'dashboard' / job_id
+            out.mkdir(parents=True, exist_ok=True)
+            (out / 'result.json').write_text(json.dumps(clean(result), allow_nan=False))
+            for kind, content in exports.items():
+                (out / f'{kind}.csv').write_text(content)
             with self.lock:
                 self.jobs[job_id].update(status='complete', progress='Complete', result=result, exports=exports)
         except (DataError, ValueError) as exc:

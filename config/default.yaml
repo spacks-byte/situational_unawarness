@@ -59,6 +59,26 @@ execution:
   cancel_settle_seconds: 2.0         # after cancelling stale orders, wait before reading the account
 
 backtest:
+  # Execution stress: market slippage applies to RXM/MA market covers too.
+  market_slippage_bps: 0
+  penetration_ticks: 0
+  penetration_probability: 1.0
+  random_seed: 0
+  liquidate_mm: false
+  archive_cache_dirs: [data/mm-1s, ../shared-backtest/data]
+  candle_store_dir: var/market
+  instrument_rules_path: var/backtest/instrument-rules.json
+  instrument_rules: {}               # pair -> Roostoo rule overrides
+  download_missing: true
+  mm:                               # independent backtest, all entered capital goes to MM
+    allocations: {PEPE: 0.85, BONK: 0.075, 1000CHEEMS: 0.075}
+    refresh_seconds: 600
+    warmup_seconds: 3600
+    feature_lag_seconds: 1
+    lot_fraction: 0.05
+    inventory_fraction: 0.70
+    enforce_one_tick_distance: true
+    reference_source: candle_close
   initial_cash: 100000.0
   limit_offset_bps: 0.0
   limit_fill: through                # through | touch

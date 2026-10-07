@@ -1,0 +1,16 @@
+{
+  "tardis_rows": 348,
+  "source_files": 41,
+  "family_counts": {
+    "Refresh \u00d7 minimum distance \u00d7 shorts": 48,
+    "Penetration p=0.5 / 1": 24,
+    "Penetration p=0.8": 12,
+    "Reference price \u2014 touch fills": 36,
+    "Reference price \u2014 p=0.9": 36,
+    "Feed latency \u2014 touch / p=0.9": 192
+  },
+  "standalone_charts": true,
+  "no_external_scripts": true,
+  "no_network_requests": true,
+  "html_sha256": "6c5a8636a71a246e41d67cf9331cd62b06cbc0708fe7c7947d51a27f1325d835"
+}

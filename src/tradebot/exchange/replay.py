@@ -14,6 +14,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from tradebot.core.clock import Clock
@@ -23,11 +24,42 @@ from tradebot.core.symbols import to_coin, to_pair
 BAR = pd.Timedelta(minutes=15)
 
 
+def order_penetration(seed, second, buy, ticks, probability):
+    """Native SplitMix64: shared draws across coins, independent of traversal order."""
+    if ticks == 0 or probability == 0:
+        return 0
+    if probability == 1:
+        return ticks
+    mask = (1 << 64) - 1
+    def mix(x):
+        x = (x + 0x9e3779b97f4a7c15) & mask
+        x = ((x ^ (x >> 30)) * 0xbf58476d1ce4e5b9) & mask
+        x = ((x ^ (x >> 27)) * 0x94d049bb133111eb) & mask
+        return x ^ (x >> 31)
+    key = mix(seed) ^ mix(second) ^ (0x243f6a8885a308d3 if buy else 0x13198a2e03707344)
+    return ticks if (mix(key) >> 11) * 2**-53 < probability else 0
+
+
+def touches_limit(observed, limit, tick, penetration, buy):
+    # Match the native long-double threshold and sub-tick comparison tolerance.
+    observed = np.asarray(observed, dtype=np.longdouble)
+    threshold = np.longdouble(limit) + (-1 if buy else 1) * np.longdouble(penetration) * np.longdouble(tick)
+    tolerance = np.minimum(8 * np.finfo(float).eps * np.maximum(np.maximum(abs(observed), abs(limit)), abs(threshold)),
+                           np.longdouble(tick) * 1e-7)
+    touched = observed <= threshold + tolerance if buy else observed >= threshold - tolerance
+    if penetration:
+        touched &= observed < limit if buy else observed > limit
+    return touched
+
+
 class ReplayExchangePort:
     is_live = False
 
     def __init__(self, bars: dict[str, pd.DataFrame], clock: Clock, initial_usd: float = 100_000.0,
-                 fees: FeeSchedule | None = None, intervals: dict[str, str] | None = None) -> None:
+                 fees: FeeSchedule | None = None, intervals: dict[str, str] | None = None, *, execution=None, rules=None) -> None:
+        self.execution = execution
+        self.rules = rules or {}
+        self.slippage = execution.market_slippage_bps / 10000 if execution else 0.0
         self.intervals = {to_pair(c): v for c, v in (intervals or {}).items()}
         self._synced_pairs = {}
         self.clock = clock
@@ -81,9 +113,9 @@ class ReplayExchangePort:
             first = placed.ceil(interval) if interval == "1s" else placed.floor(interval)
             window = df.loc[max(start, first):last]
             if interval == "1s" and len(window):
-                # Zero-adverse PoC: trade-containing candle touches, no penetration.
+                # A side fills once on its first qualifying trade-containing candle.
                 prices = window["low"] if order["Side"] == "BUY" else window["high"]
-                touches = prices <= order["Price"] if order["Side"] == "BUY" else prices >= order["Price"]
+                touches = self._limit_touched(order, prices)
                 volume = window["volume"] if "volume" in window else pd.Series(1., index=window.index)
                 window = window[touches & (window["trades"] > 0) & (volume > 0)].head(1)
             for ts, bar in window.iterrows():
@@ -92,17 +124,28 @@ class ReplayExchangePort:
         self._synced_to = now
         self._synced_pairs = {pair: self._last_closed(pair) for pair in self.bars}
 
+    def _limit_touched(self, order, observed):
+        buy, price = order["Side"] == "BUY", order["Price"]
+        if self.intervals.get(order["Pair"]) == "1s":
+            if self.execution:
+                return touches_limit(observed, price, order["PostingTick"], order["PenetrationTicks"], buy)
+            return observed <= price if buy else observed >= price
+        return observed < price if buy else observed > price
+
     def _try_fill(self, order: dict[str, Any], bar: pd.Series, ts: pd.Timestamp) -> bool:
-        px = order["Price"]
-        side = order["Side"]
-        touch = self.intervals.get(order["Pair"]) == "1s"
-        if side == "BUY" and (bar["low"] <= px if touch else bar["low"] < px):
+        px, side = order["Price"], order["Side"]
+        if self.intervals.get(order["Pair"]) == "1s" and (bar.get("trades", 0) <= 0 or bar.get("volume", 1) <= 0):
+            return False
+        observed = bar["low"] if side == "BUY" else bar["high"]
+        if not self._limit_touched(order, observed):
+            return False
+        if side == "BUY":
             base = to_coin(order["Pair"])
             self.coins[base] = self.coins.get(base, 0.0) + order["Quantity"]
-            self.free_usd -= order["Quantity"] * px * self.fees.spot_maker
-        elif side == "SELL" and (bar["high"] >= px if touch else bar["high"] > px):
+            self.free_usd -= order["Quantity"] * px * self.fees.spot_maker - order.get("ReservedFee", 0)
+        elif side == "SELL":
             self.free_usd += order["Quantity"] * px * (1 - self.fees.spot_maker)
-        elif side == "SHORT_OPEN" and (bar["high"] >= px if touch else bar["high"] > px):
+        elif side == "SHORT_OPEN":
             self._add_short(order["Pair"], order["Collateral"], px)
         else:
             return False
@@ -141,7 +184,7 @@ class ReplayExchangePort:
 
     def get_balance(self):
         self._count("get_balance")
-        locked = sum(o["Quantity"] * o["Price"] for o in self.orders if o["Side"] == "BUY")
+        locked = sum(o["Quantity"] * o["Price"] + o.get("ReservedFee", 0) for o in self.orders if o["Side"] == "BUY")
         locked += sum(o["Collateral"] for o in self.orders if o["Side"] == "SHORT_OPEN")
         wallet = {"USD": {"Free": self.free_usd, "Lock": locked}}
         sell_locked: dict[str, float] = {}
@@ -173,6 +216,8 @@ class ReplayExchangePort:
                  "CreateTimestamp": int(self._now().timestamp() * 1000)}
         self._next_id += 1
         if order_type == "MARKET":
+            last *= 1 + self.slippage if side == "BUY" else 1 - self.slippage
+            order["Price"] = last
             if side == "BUY":
                 cost = qty * last * (1 + self.fees.spot_taker)
                 if cost > self.free_usd:
@@ -182,13 +227,19 @@ class ReplayExchangePort:
             else:
                 self.coins[base] -= qty
                 self.free_usd += qty * last * (1 - self.fees.spot_taker)
-            order.update(Status="FILLED", FilledQuantity=qty, FilledAverPrice=last)
+            order.update(Status="FILLED", FilledQuantity=qty, FilledAverPrice=last, FinishTimestamp=int(self._now().timestamp()*1000))
             self._fill(pair, side, "MARKET", qty, last)
         else:
+            if self.execution:
+                order["PostingTick"] = 10.0 ** -int(self.rules[pair]["PricePrecision"])
+                order["PenetrationTicks"] = order_penetration(
+                    self.execution.random_seed, int(self._now().timestamp()), side == "BUY",
+                    self.execution.penetration_ticks, self.execution.penetration_probability)
             if side == "BUY":
-                if qty * order["Price"] > self.free_usd:
+                order["ReservedFee"] = qty * order["Price"] * self.fees.spot_maker if self.execution else 0.0
+                if qty * order["Price"] + order["ReservedFee"] > self.free_usd:
                     return {"Success": False, "ErrMsg": "insufficient USD"}
-                self.free_usd -= qty * order["Price"]
+                self.free_usd -= qty * order["Price"] + order["ReservedFee"]
             else:
                 self.coins[base] -= qty
             order.update(Status="PENDING", FilledQuantity=0.0)
@@ -203,8 +254,9 @@ class ReplayExchangePort:
             if (order_id is not None and str(o["OrderID"]) == str(order_id)) or (order_id is None and pair in (None, o["Pair"])):
                 self.orders.remove(o)
                 o["Status"] = "CANCELED"
+                o["FinishTimestamp"] = int(self._now().timestamp()*1000)
                 if o["Side"] == "BUY":
-                    self.free_usd += o["Quantity"] * o["Price"]
+                    self.free_usd += o["Quantity"] * o["Price"] + o.get("ReservedFee", 0)
                 elif o["Side"] == "SELL":
                     base = to_coin(o["Pair"])
                     self.coins[base] = self.coins.get(base, 0.0) + o["Quantity"]
@@ -241,6 +293,7 @@ class ReplayExchangePort:
             self.history.append(order)
             return {"Success": True, **{k: order[k] for k in ("ID", "Pair", "Status", "Collateral", "OpenFee", "CreateTimestamp")},
                     "OrderType": "LIMIT", "EntryPrice": order["Price"], "ShortQty": order["Quantity"]}
+        last *= 1 - self.slippage
         pos = self._add_short(pair, collateral, last)
         self._fill(pair, "SHORT_OPEN", "MARKET", collateral / last, last)
         return {"Success": True, "ID": pos["ID"], "Pair": pair, "OrderType": "MARKET", "EntryPrice": pos["EntryPrice"],
@@ -264,7 +317,7 @@ class ReplayExchangePort:
         self._count("close_short")
         pair = to_pair(pair_or_coin)
         pos = self.shorts.get(pair)
-        price = self.last_price(pair)
+        price = self.last_price(pair) * (1 + self.slippage)
         if pos is None or price <= 0:
             return {"Success": False, "ErrMsg": "no open short"}
         qty = pos["ShortQty"] * float(close_pct) / 100.0 if close_qty is None else min(float(close_qty), pos["ShortQty"])
@@ -303,7 +356,7 @@ class ReplayExchangePort:
     def equity(self) -> float:
         self._sync()
         value = self.free_usd
-        value += sum(o["Quantity"] * o["Price"] for o in self.orders if o["Side"] == "BUY")
+        value += sum(o["Quantity"] * o["Price"] + o.get("ReservedFee", 0) for o in self.orders if o["Side"] == "BUY")
         value += sum(o["Collateral"] for o in self.orders if o["Side"] == "SHORT_OPEN")
         value += sum(q * self.last_price(to_pair(c)) for c, q in self.coins.items())
         value += sum(o["Quantity"] * self.last_price(o["Pair"]) for o in self.orders if o["Side"] == "SELL")
