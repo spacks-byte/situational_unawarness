@@ -121,6 +121,12 @@ def _dashboard_command(args, settings: Settings) -> int:
     return dashboard_main(args.dashboard_args)
 
 
+def _desk_command(args, settings: Settings) -> int:
+    from tradebot.dashboard.server import main as server_main
+
+    return server_main(['--port', str(args.port)], settings=settings)
+
+
 def _account_command(args, settings: Settings) -> int:
     import json
 
@@ -197,6 +203,10 @@ def build_parser() -> argparse.ArgumentParser:
                           add_help=False)
     dash.add_argument("dashboard_args", nargs=argparse.REMAINDER)
     dash.set_defaults(handler=_dashboard_command)
+
+    desk = sub.add_parser('desk', help='Serve the interactive Supabase research dashboard locally')
+    desk.add_argument('--port', type=int, default=8765)
+    desk.set_defaults(handler=_desk_command)
 
     account = sub.add_parser("account", help="Read-only checks of the shared MM/RXM account (no orders)")
     account.add_argument("action", choices=["preflight", "explain"],

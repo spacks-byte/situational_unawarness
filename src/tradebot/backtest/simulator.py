@@ -14,7 +14,7 @@ import pandas as pd
 from tradebot.core.config import BacktestConfig
 from tradebot.strategy.base import Strategy
 
-TRADE_COLUMNS = ["time", "symbol", "side", "order_type", "filled", "quantity", "price", "value", "fee"]
+TRADE_COLUMNS = ["time", "symbol", "side", "order_type", "filled", "quantity", "price", "value", "fee", "quote_price"]
 
 
 @dataclass
@@ -105,7 +105,9 @@ def run_backtest(strategy: Strategy, data: dict[str, pd.DataFrame], interval: st
     orders = []
 
     def record(ts, i, side, order_type, filled, q, price, fee):
-        orders.append((ts, symbols[i], side, order_type, filled, q, price, q * price, fee))
+        # Keep the submitted limit separately: gap improvement can change the fill price.
+        quote = (buy_px[i] if side == "BUY" else sell_px[i]) if order_type == "LIMIT" else None
+        orders.append((ts, symbols[i], side, order_type, filled, q, price, q * price, fee, quote))
 
     def close_short(i, q, price, ts, side="COVER"):
         nonlocal cash

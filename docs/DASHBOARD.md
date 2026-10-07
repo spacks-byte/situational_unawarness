@@ -1,6 +1,127 @@
 # Trading dashboard and Guard
 
-The dashboard is a single static HTML file: no server, no network, everything inline. The Guard
+## Interactive research desk (Supabase)
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python -m tradebot desk --port 8766
+# Open http://127.0.0.1:8766
+```
+
+The interactive desk reads `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` from the
+repository-root `.env` (existing environment variables take precedence). Run it
+from the repository root. Credentials stay on the Python server; the browser
+only calls local dashboard endpoints. The server binds to loopback, checks Host
+and Origin, and requires a session token for backtest submissions. It does not
+place orders or write to Supabase. Do not expose this local server through a public proxy.
+
+### Research
+
+- Choose **RXM** (competition / neutral presets) or **MA crossover**, capital,
+  inclusive start and exclusive end in UTC, symbols, candle interval, strategy
+  parameters, fees, limit offset, rebalance band and lock-in settings. The
+  quote-based MM strategy is available in live monitoring; it needs its own
+  simulator adapter before it can be offered as a backtest in this UI.
+- Runs use the existing `run_backtest` implementation. RXM receives 45 days of
+  warm-up; MA receives enough bars for its slow average. Missing candles fail
+  the run explicitly instead of silently shrinking the universe. Periods are
+  limited to 90 days and completed candles.
+- Historical Binance spot / USDT candles are loaded from configured local
+  Parquet files when coverage is complete, or downloaded through Binance's
+  public market-data API. Complete windows are cached in `var/dashboard/candles`.
+  Initial RXM downloads cover its full 35-symbol universe and may take a few minutes.
+- P&L includes simulator fees. Sharpe and Sortino use UTC daily close-to-close
+  returns, annualized with 365 days and a zero risk-free rate. Calmar is
+  annualized compounded return divided by maximum drawdown. First-day returns
+  start from initial capital; partial boundary days count. Undefined ratios
+  display **—**. Drawdown uses every simulation bar, including initial capital
+  in the peak, so first-bar losses are included.
+- Hover over equity, drawdown, prices and execution markers. Buy/cover markers
+  are green; sell/short markers are red. Backtest execution times are bar times,
+  because OHLC candles do not reveal the exact intrabar fill time.
+- **Quotes CSV** exports all submitted limit orders (including unfilled orders),
+  original limit price, fill outcome, execution price and expiry. Quotes expire
+  after one bar. **Trades CSV** exports executed orders only, including market
+  covers, quantities, prices and fees. CSVs contain full-resolution rows even
+  when long price/equity curves are reduced for display. Quantities follow the
+  simulator's notional sizing, without exchange lot-size rounding.
+- One backtest runs at a time. The five most recent results/exports remain in
+  server memory until eviction or restart. Reloading the page resumes the latest
+  run for that browser tab.
+
+### Live tables and comparison
+
+The data source is the existing `trade_transactions` table, filtered to
+`environment=live`, paginated in full and refreshed every 30 seconds while the
+page is visible. Latest records are deduplicated by account and exchange order ID.
+Strategy and account filters apply to both live tables; status and symbol/order
+search additionally filter the blotter.
+
+The **Strategy P&L** table shows realized, unrealized and total P&L per strategy,
+plus account and open-position counts. It respects the strategy/account filters
+and aggregates accounts only after calculating each account's cost basis
+separately. Realized P&L uses weighted-average entry cost on closed quantities,
+including fully closed positions; unrealized P&L uses current Binance USDT marks.
+These values cover all available recorded history and exclude cash trading fees;
+coin-denominated fees adjust holdings and cost basis. `PARTIALLY_FILLED` orders
+are excluded from both components. Missing entry history makes the affected
+strategy totals unavailable; missing marks affect unrealized and total P&L while
+retaining known realized P&L. Order-status and search filters affect only the
+blotter, not strategy totals.
+
+Positions are reconstructed separately for each account, strategy, symbol and
+long/short side using cumulative filled quantities and weighted-average entry
+prices. Orders with `PARTIALLY_FILLED` in either the ledger status or exchange
+status are excluded from position quantities, entry prices and P&L, including
+orders whose exchange status is cancelled. This applies to both opening and
+closing orders. They remain visible in the blotter and execution charts.
+USD trade entries are treated as USDT at 1:1; displayed position P&L is
+**unrealized and before fees**, marked to Binance spot USDT. Base-currency fees
+reduce long holdings when recorded. Missing marks and insufficient position
+history show **—**, not a zero price or invented cost basis. This is a ledger
+view, not an authoritative exchange balance: transfers and trades missing from
+Supabase cannot be reconstructed. Cancelled orders retain their executed
+quantities, and the UI shows both cancellation and the recorded fills.
+
+Enable **Show live executions** to show actual fills beside the simulated
+executions. Choose a live strategy and symbol; the account filter also applies.
+The live chart is strictly bounded by the first submitted transaction and last
+recorded resolution for that strategy/account. The chart explicitly labels this
+as the **recorded activity window**. Live markers use final fill timestamps and
+cumulative order fills; individual partial-fill timestamps are unavailable.
+
+**TODO — strategy lifecycle:** add a `strategy_runs` table with strategy, bot ID,
+activation, deactivation and heartbeat timestamps, including restart intervals.
+Replace the inferred bounds in `dashboard/remote.py::execution_window` and
+`dashboard/research.py::live_executions` with those intervals. Transaction gaps
+cannot prove inactivity, and the final transaction cannot prove the strategy
+has stopped. Until lifecycle data exists, retain the recorded-window label.
+
+**TODO — account reconciliation:** add periodic exchange position snapshots and
+per-fill events to distinguish incomplete trade history, exact partial-fill
+times and account inventory that predates a strategy's recorded orders.
+
+### Implementation and verification
+
+- `dashboard/remote.py`: read-only Supabase/Binance adapters, order normalization,
+  position reconstruction and recorded activity bounds.
+- `dashboard/research.py`: request validation, simulator integration, daily
+  metrics, CSVs and live execution charts.
+- `dashboard/server.py`: local HTTP API and background run lifecycle.
+- `dashboard/app.html`, `app.css`, `app.js`: responsive UI, charts and filters.
+
+```bash
+.venv/bin/python -m pytest -q tests/test_dashboard_server.py tests/test_backtest.py tests/test_metrics.py
+```
+
+Provider references: [Supabase REST API](https://supabase.com/docs/guides/api),
+[server-side API keys](https://supabase.com/docs/guides/getting-started/api-keys),
+[Binance public market data](https://developers.binance.com/en/docs/products/spot/rest-api).
+
+## Static dashboard and Guard
+
+The original `tradebot dashboard` command builds a single static HTML file: no server, no network, everything inline. The Guard
 (`tradebot/live/guard.py`) is a second line of defence. The bot calls it before every order batch and on
 every poll. Neither one calls an exchange or reads credentials.
 

@@ -28,6 +28,7 @@ pip install -e ".[dev]"
 cp .env.example .env                                   # add your Roostoo API key and secret
 
 python -m pytest -q                                     # test suite
+python -m tradebot desk --port 8766                      # interactive Supabase dashboard
 python -m tradebot data                                 # download candles (~640 MB per year)
 python -m tradebot backtest --strategy rxm --params k=3,tilt=0.3,buffer=2 --windows --window-days 14
 
@@ -54,7 +55,7 @@ src/tradebot/
   research/   RXM experiments and disciplined tuning
   engine/     live execution engine
   live/       candle bridge, guard, re-pegging, throttle, unattended runner, replay simulation
-  dashboard/  static trading-desk dashboard
+  dashboard/  interactive Supabase research desk + static dashboard
 config/       default.yaml, competition.yaml
 tests/        pytest suite
 docs/         strategy, operations, architecture, review
