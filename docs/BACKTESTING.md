@@ -93,7 +93,7 @@ minimum-notional or tradability rules produce an actionable error.
 | `--mm-warmup-seconds` | 3600 | Observed seconds before trading |
 | `--feature-lag-seconds` | 1 | Additional completed-candle feature lag, smaller than warm-up |
 | `--lot-fraction` | .05 | Fixed fraction of starting symbol capital at startup anchor |
-| `--inventory-fraction` | .70 | Long inventory capacity, valued at latest completed close |
+| `--inventory-fraction` | .40 | Long inventory capacity, valued at latest completed close |
 | `--no-one-tick-distance` | not set | Disable the existing minimum one-tick quote distance |
 | `--penetration-ticks` | 0 | Additional ticks below bids / above asks required for filling |
 | `--penetration-probability` | 1 | Probability each side requires that penetration; otherwise touch |

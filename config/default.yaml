@@ -72,12 +72,15 @@ backtest:
   download_missing: true
   mm:                               # independent backtest, all entered capital goes to MM
     allocations: {PEPE: 0.85, BONK: 0.075, 1000CHEEMS: 0.075}
-    refresh_seconds: 600
+    quote_refresh_seconds: 270
+    volatility_spread_coefficient: 100.0
+    inventory_skew_coefficient: 7.5
+    signal_horizon_seconds: 330
+    enforce_one_tick_distance: false
     warmup_seconds: 3600
     feature_lag_seconds: 1
     lot_fraction: 0.05
-    inventory_fraction: 0.70
-    enforce_one_tick_distance: true
+    inventory_fraction: 0.40
     reference_source: candle_close
   initial_cash: 100000.0
   limit_offset_bps: 0.0

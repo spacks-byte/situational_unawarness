@@ -212,17 +212,23 @@ class MarketMakingConfig(_Section):
     # compatible with the original three-book preset and independent tests.
     allocations: dict[str, float] = Field(default_factory=lambda: {
         "PEPE": 0.85, "BONK": 0.075, "1000CHEEMS": 0.075})
+    # ``refresh_seconds`` is retained as a compatibility input for existing
+    # configs; new profiles should use ``quote_refresh_seconds``.
     refresh_seconds: int = Field(default=600, ge=1)
+    quote_refresh_seconds: int = Field(default=270, ge=1)
+    volatility_spread_coefficient: float = Field(default=100.0, gt=0)
+    inventory_skew_coefficient: float = Field(default=7.5, gt=0)
+    signal_horizon_seconds: int = Field(default=330, ge=1)
     warmup_seconds: int = Field(default=3600, ge=3600)
     feature_lag_seconds: int = Field(default=1, ge=1)
     # Midpoint is opt-in so candle-only historical replays remain reproducible.
     reference_source: Literal["candle_close", "midpoint"] = "candle_close"
     max_book_age_seconds: float = Field(default=2.0, gt=0, le=60)
-    enforce_one_tick_distance: bool = True
+    enforce_one_tick_distance: bool = False
     # Live 1s candles arrive 2-3 s late: decide at last complete second + 1 s if at most this far behind
     max_data_delay_seconds: float = Field(default=5.0, ge=0, le=60)
     lot_fraction: float = Field(default=0.05, gt=0, le=1)
-    inventory_fraction: float = Field(default=0.70, gt=0, le=1)
+    inventory_fraction: float = Field(default=0.40, gt=0, le=1)
     # Reconciliation (docs/MARKET_MAKING.md "Reconciliation without a global halt").
     # Cash differences up to cash_tolerance_bps of the notional filled in a sync (min floor) are fee/
     # proceeds rounding: absorbed and journaled. Larger ones restrict only the traced scope.
@@ -237,6 +243,15 @@ class MarketMakingConfig(_Section):
     # Empty = per-account lock in the user's state dir, keyed to base URL + API key (tradebot.core.locking).
     # Set only for tests or unusual hosts; a relative path is resolved against the start directory.
     account_lock: str = ""
+
+    @model_validator(mode="after")
+    def sync_quote_refresh(self):
+        # An explicitly supplied legacy value wins, while the new field is
+        # mirrored back for callers that still inspect refresh_seconds.
+        if self.refresh_seconds != 600:
+            self.quote_refresh_seconds = self.refresh_seconds
+        self.refresh_seconds = self.quote_refresh_seconds
+        return self
 
     @model_validator(mode="after")
     def validate_allocations(self):
@@ -254,6 +269,7 @@ class BacktestMMConfig(MarketMakingConfig):
     """Research controls; independent of the live account allocation and cadence."""
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     refresh_seconds: int = Field(default=600, ge=1, le=86400)
+    quote_refresh_seconds: int = Field(default=270, ge=1, le=86400)
     warmup_seconds: int = Field(default=3600, ge=2, le=86400)
     feature_lag_seconds: int = Field(default=1, ge=0, le=86399)
 

@@ -41,6 +41,10 @@ market_making:
     mm_fraction: 0.90
   allocations:
     PEPE: 1.0
-  refresh_seconds: 180
+  quote_refresh_seconds: 270
+  volatility_spread_coefficient: 100.0
+  inventory_skew_coefficient: 7.5
+  signal_horizon_seconds: 330
   enforce_one_tick_distance: false
+  inventory_fraction: 0.40
   rxm_state_dir: var/rxm-clean

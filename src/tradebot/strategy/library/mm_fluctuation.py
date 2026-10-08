@@ -17,8 +17,12 @@ from tradebot.engine.schema.models import LimitQuote, QuoteBatch
 from tradebot.strategy.base import Strategy
 
 
-def combined_quotes(reference, variance, alpha, inventory_units, anchor, tick, *, enforce_one_tick_distance=True):
-    """Frozen zero-adverse PoC parameters; infinite live horizon uses a 30s signal."""
+def combined_quotes(reference, variance, alpha, inventory_units, anchor, tick, *,
+                    enforce_one_tick_distance=True,
+                    volatility_spread_coefficient=0.5,
+                    inventory_skew_coefficient=1.0,
+                    signal_horizon_seconds=30.0):
+    """Build quotes using the original helper defaults unless overridden."""
     if not all(math.isfinite(x) for x in (reference, variance, alpha, inventory_units, anchor, tick)) \
             or min(reference, anchor, tick) <= 0 or variance < 0:
         return 0.0, 0.0
@@ -28,9 +32,12 @@ def combined_quotes(reference, variance, alpha, inventory_units, anchor, tick, *
     premium = math.log1p(ratio) / gamma
     power_log = (1.0 / ratio + 1.0) * math.log1p(ratio)
     c2 = math.sqrt(gamma * (variance * scale * scale) / (2.0 * arrival * kappa) * math.exp(power_log))
-    forecast = alpha * scale * 30.0 * (-math.expm1(-1.0))
-    center = -inventory_units * c2 + forecast
-    half = min(max(premium + 0.5 * c2, 2e-4 * scale), 0.01 * scale)
+    signal_decay_seconds = 30.0
+    forecast = (alpha * scale * signal_decay_seconds
+                * (-math.expm1(-signal_horizon_seconds / signal_decay_seconds)))
+    center = forecast - inventory_skew_coefficient * inventory_units * c2
+    half = min(max(premium + volatility_spread_coefficient * c2, 2e-4 * scale),
+               0.01 * scale)
     distance = max(2e-4 * scale, tick / anchor if enforce_one_tick_distance else 0.0, 1e-12 * scale)
     bid = min(reference + anchor * (center - half), reference - anchor * distance)
     ask = max(reference + anchor * (center + half), reference + anchor * distance)
@@ -135,9 +142,14 @@ class MMFluctuation(Strategy):
                 observations[coin]["reason"] = "not_tradeable"
                 continue
             tick = 10.0 ** -int(rule["PricePrecision"])
-            bid, ask = combined_quotes(reference, max(lagged[2], 1e-12), lagged[3],
-                                       book["quantity"] / state["lot"], state["anchor"], tick,
-                                       enforce_one_tick_distance=cfg.enforce_one_tick_distance)
+            bid, ask = combined_quotes(
+                reference, max(lagged[2], 1e-12), lagged[3],
+                book["quantity"] / state["lot"], state["anchor"], tick,
+                enforce_one_tick_distance=cfg.enforce_one_tick_distance,
+                volatility_spread_coefficient=cfg.volatility_spread_coefficient,
+                inventory_skew_coefficient=cfg.inventory_skew_coefficient,
+                signal_horizon_seconds=cfg.signal_horizon_seconds,
+            )
             observations[coin].update(feature_input=lagged[0], bid=bid, ask=ask, anchor=state["anchor"],
                                       lot=state["lot"], inventory_units=book["quantity"] / state["lot"], reference=reference, variance=max(lagged[2], 1e-12),
                                       reference_source=cfg.reference_source,
@@ -158,4 +170,5 @@ class MMFluctuation(Strategy):
                 if qty > 0 and qty * price >= float(rule["MiniOrder"]):
                     quotes.append(LimitQuote(symbol=coin, side=side, quantity=qty, price=price))
         return QuoteBatch(signal_id=f"{self.name}:{second}", timestamp=now,
-                          refresh_seconds=cfg.refresh_seconds, quotes=quotes, observations=observations)
+                          refresh_seconds=cfg.quote_refresh_seconds, quotes=quotes,
+                          observations=observations)

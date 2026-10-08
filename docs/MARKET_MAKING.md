@@ -44,7 +44,14 @@ stream: with it down, its closed 15-minute candles arrive through the REST repai
 pass (every 30 s), well inside the bridge's 30-minute late-bar grace. These are
 **Binance reference prices**. The execution coordinator still checks fresh Roostoo
 bid/ask prices before submitting MM orders. The live profile refreshes MM orders
-every 180 seconds (3 minutes); RXM's existing rebalance schedule is unchanged.
+every 270 seconds; RXM's existing rebalance schedule is unchanged.
+
+The MM quote policy uses a 30-second signal-decay constant, 30-second alpha EWMA
+half-life, 300-second volatility EWMA half-life, a 330-second signal horizon,
+and a 270-second quote refresh. Its volatility-spread and inventory-skew
+coefficients are 100.0 and 7.5 respectively. The extra one-tick minimum is
+disabled; outward tick rounding and the existing fee/spread filters remain
+active. Sizing, `c2`, and inventory limits are unchanged.
 
 Replay uses the same cache with an injected clock and local candle sources, without
 threads or network. It delivers elapsed observations deterministically; it never
@@ -153,7 +160,7 @@ MM cash. RXM retains its existing strategy and short policy on its own allocatio
 The combined formula, EWMA half-lives (300s volatility, 30s alpha), volatility floor,
 strict **greater-than-10-bps** round-trip filter, and positive return after spot
 fees are ported from the selected PoC. Each coin starts with a fixed base lot worth
-5% of its budget at the startup anchor; the inventory cap is 70% of its budget.
+5% of its budget at the startup anchor; the inventory cap is 40% of its budget.
 
 The strategy consumes 3,600 consecutive completed Binance one-second candles for
 warmup and applies one additional second of feature lag. At decision second `t`,
