@@ -1,0 +1,44 @@
+# Shared-account live market-making profile.
+# Use a fresh --state-dir for every deployment; never reuse an old SQLite state directory.
+
+execution:
+  live_mode: false
+  dry_run: true
+  limit_offset_bps: 5.0
+  strategy_poll_interval_seconds: 60
+  fill_timeout_seconds: 900
+  max_child_order_pct: 0.5
+  max_gross_exposure: 1.0
+  max_net_exposure: 1.0
+  max_per_symbol_exposure: 1.0
+  min_cash_reserve_usd: 200.0
+  max_total_short_collateral_usd: 100000.0
+  max_daily_loss_usd: 1.0e9
+  max_drawdown_pct: 1.0
+  max_order_value_usd: 100000.0
+  max_effective_leverage: 1.0
+
+live:
+  strategies: [mm-10m-fluctuation, rxm]
+  mode: comp
+  state_dir: var/shared-live
+  market_store_dir: var/market
+  market_store_retention_days: 30
+  market_store_min_free_gb: 1.0
+  escalate: true
+  ladder_bps: [5.0, 0.0]
+  cross_bps: 10.0
+  guard:
+    max_symbol_weight: 1.0
+    warn_symbol_weight: 0.90
+    max_order_frac_equity: 0.51
+    max_order_notional_usd: 60000.0
+    lockin_return: 0.0
+
+market_making:
+  enabled: true
+  capital:
+    mm_fraction: 0.90
+  allocations:
+    PEPE: 1.0
+  rxm_state_dir: var/rxm-clean
