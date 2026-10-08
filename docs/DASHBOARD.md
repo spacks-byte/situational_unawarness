@@ -43,6 +43,14 @@ place orders or write to Supabase. Do not expose this local server through a pub
   warm-up; MA receives enough bars for its slow average. Missing candles fail
   the run explicitly instead of silently shrinking the universe. Periods are
   limited to 90 days and completed candles.
+- **Time range** offers **Date range** or **Last X hours / minutes** for every
+  strategy. Relative runs resolve once at submission to the latest completed
+  UTC candle, with warm-up loaded separately. Duration must span whole candles
+  (e.g. 30 minutes with 5m candles). Result labels and saved configuration show
+  exact UTC start/end times. The API accepts `last_hours` or `last_minutes`
+  instead of `start` / `end`. Missing recent candles fail the run rather than
+  moving the window back to older data. Daily ratios can be undefined for short
+  runs with too few daily observations.
 - Historical Binance spot / USDT candles are loaded from configured local
   Parquet files when coverage is complete, or downloaded through Binance's
   public market-data API. Complete windows are cached in `var/dashboard/candles`.

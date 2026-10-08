@@ -172,7 +172,8 @@ def test_absent_cache_and_missing_rules_are_actionable(tmp_path):
     assert instrument_rules(cfg,SYMBOLS)[0]==RULES
 
 
-def test_dashboard_mm_exports_and_effective_configuration(tmp_path):
+@pytest.mark.parametrize('relative', [False, True])
+def test_dashboard_mm_exports_and_effective_configuration(tmp_path, monkeypatch, relative):
     settings=Settings()
     settings.backtest.instrument_rules=RULES
     settings.backtest.instrument_rules_path=str(tmp_path/'rules.json')
@@ -185,7 +186,13 @@ def test_dashboard_mm_exports_and_effective_configuration(tmp_path):
             path=tmp_path/'store'/'1s'/s/f'{day}.parquet'
             path.parent.mkdir(parents=True,exist_ok=True)
             part.to_parquet(path)
-    req=BacktestRequest(strategy='mm-10m-fluctuation',start=START.isoformat(),end=(START+pd.Timedelta(seconds=12)).isoformat(),mm=dict(warmup_seconds=4,refresh_seconds=3))
+    period = dict(start=START.isoformat(), end=(START+pd.Timedelta(seconds=12)).isoformat())
+    if relative:
+        from tradebot.backtest.period import relative_period
+        monkeypatch.setattr('tradebot.dashboard.research.relative_period',
+                            lambda interval, **kwargs: relative_period(interval, now=START+pd.Timedelta(seconds=12), **kwargs))
+        period = dict(last_minutes=.2)
+    req=BacktestRequest(strategy='mm-10m-fluctuation',**period,mm=dict(warmup_seconds=4,refresh_seconds=3))
     payload,exports=perform_backtest(req,object(),settings=settings)
     quotes=pd.read_csv(StringIO(exports['quotes']))
     trades=pd.read_csv(StringIO(exports['trades']))

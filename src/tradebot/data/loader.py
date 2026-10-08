@@ -30,9 +30,9 @@ def load_klines(symbol: str, interval: str, start: Optional[str] = None, end: Op
         )
     df = pd.read_parquet(path)
     if start is not None:
-        df = df[df.index >= pd.Timestamp(start, tz="UTC")]
+        df = df[df.index >= pd.to_datetime(start, utc=True)]
     if end is not None:
-        df = df[df.index < pd.Timestamp(end, tz="UTC")]
+        df = df[df.index < pd.to_datetime(end, utc=True)]
     return df
 
 

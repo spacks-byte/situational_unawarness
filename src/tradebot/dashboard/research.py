@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from functools import cached_property
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Literal
 
@@ -10,6 +11,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from tradebot.backtest.simulator import run_backtest
+from tradebot.backtest.period import relative_period
 from tradebot.core.config import BacktestConfig, FeeSchedule, BacktestMMConfig, Settings
 from tradebot.core.metrics import compute_metrics, daily_returns
 from tradebot.dashboard.remote import DataError, utc, execution_window
@@ -22,8 +24,10 @@ class BacktestRequest(BaseModel):
     strategy: Literal['rxm', 'ma_crossover', 'mm-10m-fluctuation'] = 'rxm'
     preset: Literal['comp', 'neutral'] = 'comp'
     initial_capital: float = Field(default=100000, gt=0, le=1e10)
-    start: str
-    end: str
+    start: str | None = None
+    end: str | None = None
+    last_hours: float | None = Field(default=None, gt=0, le=2160)
+    last_minutes: float | None = Field(default=None, gt=0, le=129600)
     interval: Literal['1s', '5m', '15m', '1h'] = '15m'
     symbols: list[str] = Field(default_factory=lambda: list(UNIVERSE), min_length=1, max_length=50)
     limit_offset_bps: float = Field(default=5, ge=0, le=1000)
@@ -71,7 +75,7 @@ class BacktestRequest(BaseModel):
                 raise ValueError('MM uses a fixed 1s interval and frozen 5-bps maker fee.')
         elif self.interval == '1s':
             raise ValueError('The 1s interval is reserved for MM backtests.')
-        start, end = utc(self.start), utc(self.end)
+        start, end = self.resolved_period
         step = pd.Timedelta(self.interval.replace('m', 'min'))
         if end <= start or end - start > pd.Timedelta(days=90):
             raise ValueError('Choose a positive backtest period of at most 90 days.')
@@ -90,6 +94,17 @@ class BacktestRequest(BaseModel):
         if self.strategy == 'ma_crossover' and self.fast >= self.slow:
             raise ValueError('Fast MA must be smaller than slow MA.')
         return self
+
+    @cached_property
+    def resolved_period(self):
+        # Freeze the range when the request is validated, before queueing the job.
+        if self.last_hours is not None or self.last_minutes is not None:
+            if self.start is not None or self.end is not None:
+                raise ValueError('Use a relative duration or start/end dates, not both.')
+            return relative_period(self.interval, last_hours=self.last_hours, last_minutes=self.last_minutes)
+        if self.start is None or self.end is None:
+            raise ValueError('Provide start and end, or last_hours / last_minutes.')
+        return utc(self.start), utc(self.end)
 
 
 def records(frame):
@@ -120,7 +135,7 @@ def points(series, limit=1800):
 
 
 def perform_backtest(request, market, progress=lambda _: None, settings=None):
-    start, end = utc(request.start), utc(request.end)
+    start, end = request.resolved_period
     step = pd.Timedelta(request.interval.replace('m', 'min'))
     if request.strategy == 'mm-10m-fluctuation':
         from tradebot.backtest.history import SecondHistory, instrument_rules
@@ -191,7 +206,8 @@ def perform_backtest(request, market, progress=lambda _: None, settings=None):
         quotes['status'] = np.where(quotes.filled, 'filled', 'expired')
     for frame in [trades, quotes]:
         frame.insert(0, 'strategy', request.strategy)
-    payload = dict(config=request.model_dump(), effective_config=result.config.model_dump(), metadata=result.metadata, metrics=metrics,
+    config_payload = request.model_dump() | dict(start=start.isoformat(), end=end.isoformat())
+    payload = dict(config=config_payload, effective_config=result.config.model_dump(), metadata=result.metadata, metrics=metrics,
                    equity=points(result.equity), drawdown=points(drawdown),
                    daily_returns=[[t.isoformat(), float(v)] for t,v in returns.items()],
                    prices={s: points(frame.loc[frame.index >= start, 'close']) for s,frame in data.items()},

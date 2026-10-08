@@ -146,6 +146,7 @@ h1{font-size:29px}
 .configuration form{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}
 .configuration form>.two,.configuration form>details,.configuration form>#run-status,.configuration form>small,.configuration form>.primary{grid-column:1/-1}
 .configuration form>label:has(textarea){grid-column:1/-1}
+.configuration form>#range-mode-field,.configuration form>#relative-range{grid-column:1/-1}
 .panel-heading{flex-wrap:wrap}
 .live-title{align-items:start;flex-direction:column}
 .filters{flex-wrap:wrap}
@@ -165,4 +166,3 @@ h1{font-size:29px}
 footer{flex-direction:column}
 .table-scroll{max-height:340px}
 }
-

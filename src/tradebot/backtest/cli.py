@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from tradebot.backtest.simulator import buy_and_hold, run_backtest
+from tradebot.backtest.period import relative_period
 from tradebot.backtest.windows import evaluate_windows, summarize_windows
 from tradebot.core.config import Settings, BacktestMMConfig
 from tradebot.core.metrics import compute_metrics
@@ -72,8 +73,11 @@ def add_parser(subparsers) -> None:
     p.add_argument("--params", default="", help="Strategy params, e.g. fast=20,slow=100")
     p.add_argument("--symbols", help="Comma-separated coins (default: config backtest.symbols)")
     p.add_argument("--interval", help="Kline interval, e.g. 5m or 15m")
-    p.add_argument("--start", help="Inclusive, YYYY-MM-DD")
-    p.add_argument("--end", help="Exclusive, YYYY-MM-DD")
+    p.add_argument("--start", help="Inclusive UTC date or ISO timestamp")
+    p.add_argument("--end", help="Exclusive UTC date or ISO timestamp")
+    period = p.add_mutually_exclusive_group()
+    period.add_argument('--last-hours', type=float, help='Run the last X hours of completed candles')
+    period.add_argument('--last-minutes', type=float, help='Run the last X minutes of completed candles')
     p.add_argument("--cash", type=float, help="Starting portfolio in USD")
     p.add_argument("--maker-fee", type=float, help="Spot limit order fee")
     p.add_argument("--short-open-fee", type=float, help="Fee on short collateral when opening")
@@ -149,18 +153,40 @@ def _print_windows(windows, window_days: int) -> None:
 def run(args, settings: Settings) -> int:
     settings = _apply_overrides(settings, args)
     config = settings.backtest
+    relative = getattr(args, 'last_hours', None) is not None or getattr(args, 'last_minutes', None) is not None
+    trade_start = None
+    if relative:
+        if args.start or args.end or args.windows:
+            raise ValueError('Use --last-hours / --last-minutes without --start, --end or --windows.')
+        interval = '1s' if STRATEGIES[args.strategy].output_kind == 'quotes' else config.interval
+        trade_start, end = relative_period(interval, last_hours=args.last_hours, last_minutes=args.last_minutes)
+        args.start, args.end = trade_start.isoformat(), end.isoformat()
     if STRATEGIES[args.strategy].output_kind == 'quotes':
         return run_mm(args, settings)
     strategy = STRATEGIES[args.strategy](**parse_params(args.params))
     symbols = [s.strip() for s in args.symbols.split(",")] if args.symbols else config.symbols
 
-    data = load_universe(symbols, config.interval, args.start, args.end, data_dir=settings.data.dir)
+    load_start = args.start
+    if relative:
+        import pandas as pd
+        step = pd.Timedelta(config.interval.replace('m', 'min'))
+        warmup = pd.Timedelta(days=45) if args.strategy == 'rxm' else step * (strategy.params['slow'] + 2)
+        load_start = (trade_start - warmup).isoformat()
+    data = load_universe(symbols, config.interval, load_start, args.end, data_dir=settings.data.dir)
+    if relative:
+        from tradebot.core.symbols import to_coin
+        expected = pd.date_range(load_start, args.end, freq=step, inclusive='left')
+        for symbol in symbols:
+            frame = data.get(to_coin(symbol))
+            if frame is None or not expected.isin(frame.index).all():
+                raise ValueError(f'{symbol}: missing candles for {load_start} to {args.end}, including warm-up. Download the requested history first.')
     print(f"Strategy: {strategy} | {config.interval} | {', '.join(data)}")
 
     mode = "windows" if args.windows else "full"
     out = Path(config.results_dir) / f"{strategy.name}_{config.interval}_{mode}_{datetime.now():%Y%m%d-%H%M%S}"
     summary = {"strategy": strategy.name, "params": strategy.params, "symbols": list(data),
-               "interval": config.interval, "config": config.model_dump()}
+               "interval": config.interval, "config": config.model_dump(), "start": args.start, "end": args.end,
+               "last_hours": getattr(args, 'last_hours', None), "last_minutes": getattr(args, 'last_minutes', None)}
 
     if args.windows:
         windows = evaluate_windows(strategy, data, config.interval, config,
@@ -174,8 +200,9 @@ def run(args, settings: Settings) -> int:
             windows.to_csv(out / "windows.csv", index=False)
             summary["windows"] = summarize_windows(windows).to_dict()
     else:
-        result = run_backtest(strategy, data, config.interval, config)
-        benchmark = buy_and_hold(data, config)
+        result = run_backtest(strategy, data, config.interval, config, trade_start=trade_start)
+        benchmark_data = data if trade_start is None else {s: frame.loc[trade_start:] for s, frame in data.items()}
+        benchmark = buy_and_hold(benchmark_data, config)
         metrics = compute_metrics(result.equity, config.interval, result.trades,
                                   result.exposure, result.net_exposure, initial=config.initial_cash)
         bench_metrics = compute_metrics(benchmark, config.interval, initial=config.initial_cash)
@@ -243,7 +270,9 @@ def run_mm(args, settings):
         result.trades.to_csv(out/'trades.csv',index=False)
         import math
         json_metrics = {k: None if isinstance(v, float) and not math.isfinite(v) else v for k,v in metrics.items()}
-        summary = dict(strategy=args.strategy,start=start.isoformat(),end=end.isoformat(),metrics=json_metrics,**result.metadata)
+        summary = dict(strategy=args.strategy,start=start.isoformat(),end=end.isoformat(),
+                       last_hours=getattr(args, 'last_hours', None), last_minutes=getattr(args, 'last_minutes', None),
+                       metrics=json_metrics,**result.metadata)
         (out/'summary.json').write_text(json.dumps(summary,indent=2,default=str,allow_nan=False))
         print(f'Saved to {out}')
     return 0

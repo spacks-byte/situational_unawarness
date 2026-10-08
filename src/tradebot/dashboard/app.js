@@ -97,7 +97,7 @@ function renderResearch() {
   if(!result)return;
   const c=result.config;
   showMetrics(result.metrics);
-  $('run-label').textContent=`${c.strategy.toUpperCase()} · ${c.start.slice(0,10)} → ${c.end.slice(0,10)} · ${c.interval}`;
+  $('run-label').textContent=`${c.strategy.toUpperCase()} · ${dateTime(c.start)} → ${dateTime(c.end)} UTC · ${c.interval}`;
   chart('equity-chart',result.equity,[],{label:'Backtest equity in USDT'});
   $('drawdown-chart').hidden=false;
   chart('drawdown-chart',result.drawdown,[],{color:'#ed8290',percent:true,label:'Backtest drawdown'});
@@ -115,7 +115,7 @@ function updateSymbols(){
 function renderTradeChart(){
   const symbol=$('chart-symbol').value, r=state.result;
   if(!r){emptyChart('trade-chart','Run a backtest to view simulated executions.');return;}
-  $('backtest-window').textContent=`${r.config.start.slice(0,10)} → ${r.config.end.slice(0,10)}`;
+  $('backtest-window').textContent=`${dateTime(r.config.start)} → ${dateTime(r.config.end)} UTC`;
   chart('trade-chart',r.prices[symbol] || [],r.trades.filter(t=>t.symbol===symbol),{color:'#74b6d9',label:`${symbol} backtest price and executed trades`,empty:`${symbol} was not in this backtest's symbol universe.`});
 }
 async function loadLiveChart(){
@@ -239,10 +239,20 @@ $('compare').addEventListener('change',()=>{
   $('live-chart-pane').hidden=!compare;$('live-strategy-field').hidden=!compare;
   $('execution-charts').classList.toggle('comparing',compare);updateSymbols();renderTradeChart();loadLiveChart();
 });
+function changeRange(){
+  const relative=$('range-mode').value==='relative';
+  $('date-range').hidden=relative;$('relative-range').hidden=!relative;
+  for(const id of ['start','end'])$(id).disabled=relative;
+  for(const id of ['range-value','range-unit'])$(id).disabled=!relative;
+  $('range-value').max=$('range-unit').value==='hours'?'2160':'129600';
+}
+$('range-mode').addEventListener('change',changeRange);
+$('range-unit').addEventListener('change',changeRange);
 $('backtest-form').addEventListener('submit',async e=>{
   e.preventDefault();if(!state.config)return;
   const data=Object.fromEntries(new FormData(e.target));data.symbols=data.symbols.split(',').map(s=>s.trim()).filter(Boolean);data.allow_short=e.target.elements.allow_short.checked;
   for(const [name,value] of Object.entries(data))if(!['strategy','preset','start','end','interval','symbols','allow_short'].includes(name))data[name]=Number(value);
+  if($('range-mode').value==='relative')data[`last_${$('range-unit').value}`]=Number($('range-value').value);
   if(data.strategy==='mm-10m-fluctuation'){
     data.mm={allocations:{}};
     for(const [name,value] of Object.entries(data)){

@@ -23,6 +23,7 @@ Main options:
 | `--symbols` | `BTC,ETH,SOL,BNB,XRP` | Coins to trade |
 | `--interval` | `15m` | `5m` or `15m` |
 | `--start` / `--end` | full year | Date range, `YYYY-MM-DD` (end exclusive) |
+| `--last-hours` / `--last-minutes` | off | Most recent X hours or minutes, ending at the latest completed candle |
 | `--cash` | `100000` | Starting portfolio |
 | `--maker-fee` | `0.0005` | Spot limit order fee |
 | `--short-open-fee` / `--short-close-fee` | `0.001` / `0.001` | Fees on opening a short (charged on collateral, even for limit opens) and on closing one (always market) |
@@ -32,6 +33,22 @@ Main options:
 | `--windows` | off | Score many 7-day periods instead of one full year (see below) |
 
 A full-year run prints a metrics table next to an equal-weight buy-and-hold benchmark. It saves `equity.csv`, `trades.csv` and `summary.json` under `results/`.
+
+For a recent intraday window, use `--last-hours 6` or `--last-minutes 30` instead
+of `--start` / `--end`. Fractional amounts are accepted when they span whole
+candles; for example, 30 minutes with 5m candles, or 1.5 hours with 15m candles.
+Relative ranges are limited to 90 days and cannot be combined with `--windows`.
+The end is exclusive, rounded down to a completed UTC candle boundary when the
+run is submitted; saved results include the exact start and end. Warm-up is
+loaded before the requested window and is excluded from performance results.
+Weight-strategy CLI runs require downloaded history covering warm-up through
+the end; MM uses its configured cache/download providers. Missing recent data
+fails explicitly; the range is never shifted back to an older cached window.
+
+```bash
+python -m tradebot backtest --strategy ma_crossover --interval 5m --last-minutes 30
+python -m tradebot backtest --strategy mm-10m-fluctuation --last-hours 6
+```
 
 ## Independent MM backtests
 
@@ -60,7 +77,7 @@ python -m tradebot backtest --strategy mm-10m-fluctuation \
   --market-slippage-bps 10 --liquidate-mm
 ```
 
-MM requires explicit start/end times and the fixed `1s` interval. Start is
+MM requires start/end times or a relative duration, and the fixed `1s` interval. Start is
 inclusive; end is exclusive. Current-rule snapshots are historical assumptions,
 not reconstructed historical Roostoo rules. Set `backtest.instrument_rules_path`
 to saved exchangeInfo JSON. If necessary, the loader fetches **only public,
