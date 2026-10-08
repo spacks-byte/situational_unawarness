@@ -32,7 +32,8 @@ def tls_options():
     return {"cert_reqs": ssl.CERT_REQUIRED, "ca_certs": certifi.where()}
 
 
-INTERVALS = {"1s": pd.Timedelta(seconds=1), "15m": pd.Timedelta(minutes=15)}
+INTERVALS = {"1s": pd.Timedelta(seconds=1), "15m": pd.Timedelta(minutes=15),
+             "30m": pd.Timedelta(minutes=30)}
 
 
 class MarketDataEngine:
@@ -288,8 +289,9 @@ class MarketDataEngine:
             symbol = to_binance(coin).lower()
             if (coin, "1s") in self.windows:
                 streams.extend([f"{symbol}@kline_1s", f"{symbol}@bookTicker"])
-            if (coin, "15m") in self.windows:
-                streams.append(f"{symbol}@kline_15m")
+            for interval in INTERVALS:
+                if interval != "1s" and (coin, interval) in self.windows:
+                    streams.append(f"{symbol}@kline_{interval}")
         endpoint = 0
         def opened(_):
             self.stream_error = None

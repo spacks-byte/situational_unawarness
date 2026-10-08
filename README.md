@@ -47,6 +47,16 @@ Settings live in [config/default.yaml](config/default.yaml), with competition ov
 The account profile shares one strategy-neutral market-data producer: cached prices
 update every second, while MM and RXM retain their separate decision schedules.
 
+The [cointegration foundation](docs/COINTEGRATION.md) adds persistent 13-pair signals,
+shared 30-minute candles and strategy/pair/leg ownership. `cointegration-pairs` can
+join the shared runner in observation mode; its market-order adapter and dashboard
+integration are deferred. The archived one-day and fortnight acceptance replays
+are included in the test suite. CLI backtesting supports
+`backtest --strategy cointegration-pairs --last-hours 24 --pair-cost-model market`,
+or exact dates with `--windows` for independent 14-day capital resets. Each run
+can save an HTML performance report and detailed CSVs; see the guide for costs,
+data requirements and executable examples.
+
 ## Layout
 
 ```

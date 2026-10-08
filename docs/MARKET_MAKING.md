@@ -78,27 +78,17 @@ Replay and tests never write it.
 
 The live stream follows Binance's [documented kline and book-ticker streams](https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/ws-streams/~).
 
-## Deferred: strategy-neutral position ownership
+## Strategy/pair/leg ownership
 
-**Flagged for a future build; do not implement in this change.** The current
-`AccountCoordinator` hardcodes MM and RXM books. That is a temporary implementation
-limitation, not the intended ownership model: additional strategies will be added,
-and position ownership must not be restricted to these two names.
+The cointegration foundation adds version-2 ownership tables and an explicit
+version-1 migration. MM/RXM execution retains compatibility views, published to
+the owner tables in the same SQLite transaction as its snapshot and order journal.
+Independent strategies have their own allocations, quantities, entry basis, fees,
+collateral and reservations. Reconciliation includes every owner; RXM exits cannot
+close another owner's shared short quantity.
 
-The future position ledger must support these fields:
-
-| Field | Meaning |
-| --- | --- |
-| `strategy` | Strategy that owns the position. |
-| `symbol` | Instrument held by that strategy. |
-| `position` | Position quantity. |
-| `price` | Price recorded for the position. |
-
-Capital allocation, reservations and account reconciliation must operate across
-strategy-owned records rather than assume that all remaining positions belong to
-RXM. The precise meaning of `price`, accounting extensions and migration of current
-books should be specified when that future build is authorized. The existing
-coordinator's MM/RXM-specific docstring describes only its current implementation.
+See [COINTEGRATION.md](COINTEGRATION.md) for accounting semantics, the migration
+command, observation configuration and the execution work deferred to step 4.
 
 ## Capital and positions
 

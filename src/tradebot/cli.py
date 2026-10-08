@@ -60,8 +60,8 @@ def _live_overrides(args, settings: Settings) -> Settings:
     if getattr(args, "strategies", None):
         live["strategies"] = [name.strip() for name in args.strategies.split(",") if name.strip()]
         names = live["strategies"]
-        if not names or len(names) != len(set(names)) or any(n not in {"rxm", "mm-10m-fluctuation"} for n in names):
-            raise ValueError("--strategies requires unique rxm / mm-10m-fluctuation names")
+        if not names or len(names) != len(set(names)) or any(n not in {"rxm", "mm-10m-fluctuation", "cointegration-pairs"} for n in names):
+            raise ValueError("--strategies requires unique rxm / mm-10m-fluctuation / cointegration-pairs names")
         if not settings.market_making.enabled and names != ["rxm"]:
             raise ValueError("MM/account selection requires --config config/market-making.yaml")
         if len(names) == 1:
@@ -202,7 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
     live = sub.add_parser("live", help="Run the bot unattended on Roostoo (dry run unless --live)")
     live.add_argument("--live", action="store_true",
                       help="send real orders (also needs ROOSTOO_CONFIRM_LIVE=YES); default is a dry run")
-    live.add_argument("--strategies", help="independent account strategies: rxm, mm-10m-fluctuation, or both comma-separated")
+    live.add_argument("--strategies", help="comma-separated rxm, mm-10m-fluctuation, cointegration-pairs (observation only)")
     live.add_argument("--mode", help="strategy preset, e.g. comp | neutral (default: config live.mode)")
     live.add_argument("--state-dir", help="journal, logs and status (default: config live.state_dir)")
     live.add_argument("--max-loops", type=int, help="stop after N loops (testing)")

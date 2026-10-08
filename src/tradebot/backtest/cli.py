@@ -109,6 +109,10 @@ def add_parser(subparsers) -> None:
     p.add_argument('--archive-cache', dest='archive_cache_dirs', action='append', help='Verified archive root; repeat for fallback roots')
     p.add_argument('--candle-store-dir')
     p.add_argument('--download-missing', action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument('--data-dir', help='Pairs: local Binance Parquet root or flat ASSETUSDT_30m.csv.gz directory')
+    p.add_argument('--out', help='Pairs: new output directory (default: timestamped results directory)')
+    p.add_argument('--pair-cost-model', choices=['reference', 'market'],
+                   help='Pairs: reference uses spot maker fees; market uses spot taker fees. Both assume next-open fills.')
     p.set_defaults(handler=run)
 
 
@@ -151,6 +155,9 @@ def _print_windows(windows, window_days: int) -> None:
 
 
 def run(args, settings: Settings) -> int:
+    if STRATEGIES[args.strategy].output_kind == "pairs":
+        from tradebot.backtest.pairs import run_cli
+        return run_cli(args, _apply_overrides(settings, args))
     settings = _apply_overrides(settings, args)
     config = settings.backtest
     relative = getattr(args, 'last_hours', None) is not None or getattr(args, 'last_minutes', None) is not None

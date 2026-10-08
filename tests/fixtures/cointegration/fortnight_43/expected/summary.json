@@ -1,0 +1,17 @@
+{
+  "test_start": "2026-08-21T00:00:00Z",
+  "test_end": "2026-09-04T00:00:00Z",
+  "initial_capital": 10000.0,
+  "ending_equity": 10137.282139782812,
+  "return_pct": 1.3728213978281179,
+  "gross_pnl": 159.68317998853416,
+  "net_pnl": 137.28213978281178,
+  "fees": 17.67662736346563,
+  "slippage": 4.724412842256736,
+  "carry": 0.0,
+  "costs": 22.401040205722367,
+  "max_drawdown_pct": 6.36370352807325,
+  "trades": 14,
+  "natural_exits": 8,
+  "forced_exits": 6
+}

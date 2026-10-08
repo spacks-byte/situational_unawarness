@@ -60,7 +60,8 @@ class ReplayExchangePort:
         self.execution = execution
         self.rules = rules or {}
         self.slippage = execution.market_slippage_bps / 10000 if execution else 0.0
-        self.intervals = {to_pair(c): v for c, v in (intervals or {}).items()}
+        self.intervals = {to_pair(c): (v[:-1]+"min" if isinstance(v, str) and v.endswith("m") else v)
+                          for c, v in (intervals or {}).items()}
         self._synced_pairs = {}
         self.clock = clock
         self.fees = fees or FeeSchedule()

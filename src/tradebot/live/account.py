@@ -23,6 +23,8 @@ from tradebot.live.runner import LiveRunner, _universe, _write_json, account_loc
 from tradebot.live.throttle import ThrottledPort
 from tradebot.strategy.library.mm_fluctuation import MMFluctuation
 from tradebot.strategy.registry import STRATEGIES
+from tradebot.strategy.library.cointegration import CointegrationPairs
+from tradebot.live.pairs import PairRuntime
 from tradebot.telemetry.supabase import SupabaseTradeUploader
 
 log = logging.getLogger(__name__)
@@ -94,16 +96,18 @@ def legacy_ids(directory):
 
 def selected_strategies(settings):
     names = list(settings.live.strategies or [settings.live.strategy])
-    if not names or len(names) != len(set(names)) or any(n not in {"rxm", MM} for n in names):
-        raise ValueError("account strategies must be unique selections of rxm and mm-10m-fluctuation")
+    if not names or len(names) != len(set(names)) or any(n not in {"rxm", MM, CointegrationPairs.name} for n in names):
+        raise ValueError("account strategies must be unique selections of rxm, mm-10m-fluctuation and cointegration-pairs")
     return names
 
 
 class AccountRunner:
-    def __init__(self, settings, *, mode="dry-run", port=None, fetch=None, mm_fetch=None, clock=None):
+    def __init__(self, settings, *, mode="dry-run", port=None, fetch=None, mm_fetch=None, pairs_fetch=None, clock=None):
         if settings.fees.spot_maker != 0.0005:
             raise ValueError("MM preset requires the 5 bps spot maker fee")
         self.strategy_names = selected_strategies(settings)
+        if CointegrationPairs.name in self.strategy_names and settings.cointegration.cycle_start is None:
+            raise ValueError("cointegration-pairs requires an explicit cointegration.cycle_start")
         self.settings, self.mode = settings, mode
         self.clock = clock or RealClock()
         self.state_dir = Path(settings.live.state_dir)
@@ -155,6 +159,10 @@ class AccountRunner:
                 rxm_settings.live.strategy = "rxm"
                 windows.update({(coin, "15m"): settings.live.buffer_days*86400 for coin in _universe(rxm_settings)})
                 sources["15m"] = fetch or binance_public_fetch(settings.live.klines_url)
+            if CointegrationPairs.name in self.strategy_names:
+                windows.update({(coin, "30m"): settings.cointegration.retention_seconds
+                                for coin in settings.cointegration.assets})
+                sources["30m"] = pairs_fetch or binance_public_fetch(settings.live.klines_url, interval="30m")
             streams = [settings.live.market_stream_url, *settings.live.market_stream_fallback_urls]
             live_data = isinstance(self.clock, RealClock)
             store = None
@@ -167,7 +175,13 @@ class AccountRunner:
             self.market_data.start()
             for name in self.strategy_names:
                 strategy_class = STRATEGIES[name]
-                if strategy_class.output_kind == "weights":
+                if strategy_class.output_kind == "pairs":
+                    # Reference budgets and virtual fills never enter the physical
+                    # account books. Step 4 will supply the live fill adapter.
+                    self.runtimes[name] = PairRuntime(settings.cointegration,
+                        self.state_dir / name / "observation.db", clock=self.clock,
+                        fetch=self.market_data.fetch("30m"))
+                elif strategy_class.output_kind == "weights":
                     self._import_rxm_state()
                     weight_settings = settings.model_copy(deep=True)
                     weight_settings.live.strategy = name
@@ -194,6 +208,9 @@ class AccountRunner:
                 self.market_data.close()
             for engine in getattr(self, "engines", {}).values():
                 engine.close()
+            for runtime in getattr(self, "runtimes", {}).values():
+                if isinstance(runtime, PairRuntime):
+                    runtime.close()
             if self.store:
                 self.store.close()
             self.lock.close()
@@ -225,6 +242,9 @@ class AccountRunner:
         self.store.save("rxm_capital_transfer")
 
     def risk_paused(self, strategy):
+        if strategy == CointegrationPairs.name:
+            return (Path(self.settings.live.kill_file).exists() or (self.state_dir / "PAUSE").exists()
+                    or (self.state_dir / "PAUSE_PAIRS").exists())
         return (Path(self.settings.live.kill_file).exists() or (self.state_dir / "PAUSE").exists()
                 or (self.state_dir / ("PAUSE_MM" if strategy == MM else "PAUSE_RXM")).exists()
                 or strategy == MM and (self.state_dir / "STOP_MM").exists())
@@ -259,7 +279,7 @@ class AccountRunner:
                         else:
                             runtime = self.runtimes[name]
                             strategy_results[name] = runtime.run_once() or {"status": "PAUSED"}
-                            if runtime.failures:
+                            if getattr(runtime, "failures", 0):
                                 raise RuntimeError(runtime.last_error)
                         self.strategy_failures[name] = 0
                         self.retry_after[name] = 0.0
@@ -314,6 +334,9 @@ class AccountRunner:
         self.market_data.close()
         for engine in self.engines.values():
             engine.close()
+        for runtime in self.runtimes.values():
+            if isinstance(runtime, PairRuntime):
+                runtime.close()
         self.store.close()
         self.lock.close()
 

@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from tradebot.core.cointegration import CointegrationConfig
 
 DEFAULT_CONFIG_PATH = Path("config/default.yaml")
 CONFIG_ENV_VAR = "TRADEBOT_CONFIG"
@@ -107,6 +108,8 @@ class ExecutionConfig(_Section):
 
 class BacktestConfig(_Section):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    pair_cost_model: Literal["reference", "market"] = "reference"
+    pair_slippage_bps: float = Field(default=2., ge=0, lt=10000)
     market_slippage_bps: float = Field(default=0, ge=0, lt=10000)
     penetration_ticks: int = Field(default=0, ge=0)
     penetration_probability: float = Field(default=1, ge=0, le=1)
@@ -316,6 +319,7 @@ class Settings(_Section):
     data: DataConfig = Field(default_factory=DataConfig)
     live: LiveConfig = Field(default_factory=LiveConfig)
     market_making: MarketMakingConfig = Field(default_factory=MarketMakingConfig)
+    cointegration: CointegrationConfig = Field(default_factory=CointegrationConfig)
 
     @model_validator(mode="after")
     def _share_fees(self) -> "Settings":

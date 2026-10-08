@@ -63,19 +63,26 @@ def run_shared_replay(settings, start, days, cash, out_dir, keep_state=False):
                for c in settings.market_making.allocations} if MM in active else {}
     disk = parquet_fetch(settings.data.dir)
     rxm = {c: disk(c, begin-pd.Timedelta(days=settings.live.buffer_days), end) for c in _universe(settings)} if "rxm" in active else {}
+    pairs_disk = parquet_fetch(settings.data.dir, interval="30m")
+    pairs = {c: pairs_disk(c, begin-pd.Timedelta(seconds=settings.cointegration.retention_seconds), end)
+             for c in settings.cointegration.assets} if "cointegration-pairs" in active else {}
+    if any(len(f) < 2881 for f in pairs.values()):
+        raise FileNotFoundError("cointegration-pairs needs cached 30m warmup; replay never downloads data")
     missing = [c for c, df in rxm.items() if len(df) < 45*96]
     if missing:
         raise FileNotFoundError(f"RXM needs cached 15m warmup for {missing}; run tradebot data first")
-    bars = {**rxm, **seconds}
+    bars = {**pairs, **rxm, **seconds}
     clock = SimClock(begin.to_pydatetime())
     sim = ReplayExchangePort(bars, clock, initial_usd=cash, fees=settings.fees,
-                             intervals={c: "1s" for c in seconds})
+                             intervals={**{c: "30m" for c in pairs}, **{c: "15m" for c in rxm},
+                                        **{c: "1s" for c in seconds}})
     settings = settings.model_copy(deep=True)
     settings.live.state_dir = str(out)
     settings.market_making.rxm_state_dir = str(out / "no-legacy-state")
     runner = AccountRunner(settings, mode="simulate", port=sim, clock=clock,
                           fetch=lambda c, a, b: rxm[c].loc[a:b-pd.Timedelta(nanoseconds=1)],
-                          mm_fetch=lambda c, a, b: seconds[c].loc[a:b-pd.Timedelta(nanoseconds=1)])
+                          mm_fetch=lambda c, a, b: seconds[c].loc[a:b-pd.Timedelta(nanoseconds=1)],
+                          pairs_fetch=lambda c, a, b: pairs[c].loc[a:b-pd.Timedelta(nanoseconds=1)])
     statuses = Counter()
     try:
         while clock.now() < end:

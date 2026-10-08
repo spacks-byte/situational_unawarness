@@ -52,6 +52,8 @@ class Strategy(ABC):
         """Dispatch explicitly; existing weight strategies retain their DataFrame contract."""
         if self.output_kind == "quotes":
             return self.generate_quotes(data, **context)
+        if self.output_kind == "pairs":
+            raise ValueError("pair decisions require the persistent PairRuntime, not the weight bridge")
         return self.generate_weights(data)
 
     def __repr__(self):

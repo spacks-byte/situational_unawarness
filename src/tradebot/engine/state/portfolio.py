@@ -1,17 +1,10 @@
-"""Account coordination with a temporary MM/RXM-specific ledger.
+"""Account coordinator with strategy/pair/leg ownership and legacy MM/RXM adapters.
 
-The intended ownership model supports arbitrary independent strategies. A future
-position table will record strategy, symbol, position (quantity), and price.
-Allocation, reservations and reconciliation will use those strategy-owned records.
-
-TEMPORARY: this implementation uses a version-1 JSON snapshot with hardcoded MM
-and RXM books, name-based execution policies, and an RXM-specific bootstrap. These
-are transitional integration choices; they must not define ownership for future
-strategies. The general ledger and its migration are deferred; see the deferred
-position-ownership section in docs/MARKET_MAKING.md.
-
-Shared invariants remain: one coordinator owns the transport, physical balances
-reconcile before new risk is permitted, and SQLite commits precede submissions.
+Version-2 owner tables persist with the existing snapshot/order journal in one
+transaction. MM/RXM retain compatibility views for their execution and recovery
+code; those adapters publish only their own records. New owners have explicit
+allocations and confirmed fills, and never become residual RXM inventory.
+Version-1 files require the explicit ownership_migration command for new owners.
 """
 from __future__ import annotations
 
@@ -28,6 +21,8 @@ from tradebot.core.symbols import to_coin, to_pair
 from tradebot.engine.state.issues import ReconciliationIssues, evidence_value
 from tradebot.exchange.order_state import normalize_order, OrderEvidenceError, canonical_status, number as order_number
 from tradebot.telemetry.supabase import SupabaseTradeUploader
+from tradebot.engine.state.ownership import OwnershipLedger
+from tradebot.engine.state.ownership_migration import LEGACY, legacy_records, replace_legacy_records
 from tradebot.engine.state.snapshot import normalize_exchange_snapshot, remaining_qty
 
 MM = "mm-10m-fluctuation"
@@ -50,17 +45,13 @@ class AccountLock(locking.AccountLock):
 
 
 class PortfolioStore:
-    """Persist the temporary version-1 snapshot and durable order/event journals.
-
-    TODO (deferred ledger build): replace the strategy-specific position state
-    with strategy/symbol/position/price records. Migrate existing ownership and
-    accounting explicitly, preserving pending reservations and order history.
-    """
+    """Persist ownership, compatibility views and order/event journals atomically."""
 
     def __init__(self, path, clock, *, trade_uploader=None, environment="live", bot_id="tradebot"):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
         self.db.execute("PRAGMA synchronous=FULL")
+        self.ownership = OwnershipLedger(self.db)
         self.db.execute("CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, timestamp TEXT, kind TEXT, payload TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS completed_orders (intent_id TEXT PRIMARY KEY, order_id TEXT, strategy TEXT, payload TEXT)")
@@ -80,7 +71,7 @@ class PortfolioStore:
                 order["status"] = canonical_status(order["status"])
                 if order["status"] == "PARTIALLY_FILLED":
                     order["status"] = "PENDING"  # re-query legacy records; never infer their execution
-        if self.state is not None and self.state.get("version") != 1:
+        if self.state is not None and self.state.get("version") not in {1, 2}:
             raise AccountBlocked("unsupported/corrupt portfolio state")
 
     def save(self, kind, payload=None):
@@ -91,7 +82,9 @@ class PortfolioStore:
         active_state = dict(self.state, orders={k: o for k, o in self.state["orders"].items()
                                            if o["status"] not in TERMINAL})
         try:
-            with self.db:
+            with self.ownership.atomic():
+                if self.state.get("version") == 2:
+                    replace_legacy_records(self.ownership, self.state)
                 for order in orders:
                     if self.trade_uploader is not None and self.environment == "live":
                         transaction = SupabaseTradeUploader.transaction(
@@ -183,7 +176,7 @@ def canonical(value, precision):
 
 
 class AccountCoordinator:
-    """Coordinate one account through the temporary MM/RXM ownership adapter."""
+    """Coordinate physical balances against all strategy owners."""
 
     def __init__(self, port, store, config, fees, clock, *, dry_run=False, import_order_ids=(), paused=lambda strategy: False):
         self.port, self.store, self.config, self.fees, self.clock = port, store, config, fees, clock
@@ -211,6 +204,75 @@ class AccountCoordinator:
     def owner(self, coin):
         """Temporary MM-book lookup; this is not general position ownership."""
         return self.state["mm"][coin]
+
+    def extra_accounts(self):
+        return [a for a in self.store.ownership.accounts() if a["strategy"] not in LEGACY]
+
+    def extra_positions(self):
+        return [p for p in self.store.ownership.positions() if p["strategy"] not in LEGACY]
+
+    def total_short_quantity(self, pair):
+        return self.state["short_quantity"].get(pair, 0.) + sum(
+            p["quantity"] for p in self.extra_positions() if p["side"] == "short" and to_pair(p["symbol"]) == pair)
+
+    def owned_positions(self, strategy, pair_id=None):
+        """Read the actual ledger's owner records, never inferred account leftovers."""
+        if self.state.get("version") != 2:
+            raise ValueError("explicit ownership migration required for version-1 state")
+        return self.store.ownership.positions(strategy, pair_id)
+
+    def allocate_owner(self, strategy, pair_id, capital):
+        """Explicit transfer from uncommitted RXM capital; never called at startup.
+
+        This is an accounting operation for a future configured allocation, not an
+        order. Current pairs observation budgets live in their own database.
+        """
+        if self.state.get("version") != 2 or strategy in LEGACY:
+            raise ValueError("new owners require version-2 ownership and an independent strategy ID")
+        if not math.isfinite(capital) or capital <= 0 or capital > min(self.rxm_free_cash(), self.state["rxm_capital"]):
+            raise ValueError("insufficient uncommitted RXM allocation")
+        before = deepcopy(self.state)
+        try:
+            with self.store.ownership.atomic():
+                self.store.ownership.allocate(strategy, pair_id, capital)
+                self.state["rxm_capital"] -= capital
+                self.store.save("owner_allocation", dict(strategy=strategy, pair_id=pair_id, capital=capital))
+        except BaseException:
+            self.store.state = before
+            raise
+
+    def record_owned_fill(self, fill_id, *, venue_realized_pnl=None, **fill):
+        """Attribute a confirmed nonlegacy fill without sending an exchange request."""
+        if self.state.get("version") != 2 or fill["strategy"] in LEGACY:
+            raise ValueError("use the legacy adapter for existing MM/RXM executions")
+        before = deepcopy(self.state)
+        positions = self.store.ownership.positions(fill["strategy"], fill["pair_id"])
+        old = next((p for p in positions if p["leg"] == fill["leg"]), None)
+        value = fill["quantity"] * fill["price"]
+        costs = fill.get("fee", 0.) + fill.get("slippage", 0.)
+        if fill["side"] == "long":
+            change = (-value if fill["action"] == "open" else value) - costs
+        elif fill["action"] == "open":
+            change = -costs
+        else:
+            if venue_realized_pnl is None or not math.isfinite(venue_realized_pnl):
+                raise ValueError("a short cover requires the venue's realized P&L")
+            own_pnl = ((old["basis"]*fill["quantity"]/old["quantity"]) if old else 0.) - value
+            change = venue_realized_pnl - costs
+        try:
+            with self.store.ownership.atomic():
+                if not self.store.ownership.apply_fill(fill_id, settlement_pnl=venue_realized_pnl, **fill):
+                    return False
+                self.state["expected_cash_assets"] += change
+                if fill["side"] == "short" and fill["action"] == "close":
+                    # The venue settles its pooled average entry, while pair P&L
+                    # uses that pair's entry. The offset reverses as others close.
+                    self.state["short_settlement_adjustment"] += venue_realized_pnl-own_pnl
+                self.store.save("owned_fill", dict(fill_id=fill_id, venue_realized_pnl=venue_realized_pnl, **fill))
+        except BaseException:
+            self.store.state = before
+            raise
+        return True
 
     def active(self, strategy=None):
         return [o for o in self.orders.values() if o["status"] in ACTIVE and
@@ -242,7 +304,7 @@ class AccountCoordinator:
         if not math.isfinite(equity) or equity <= 0 or capital > free:
             raise AccountBlocked(f"MM funding shortfall: requires ${capital:.2f}, unreserved cash ${free:.2f}; no automatic liquidation")
         self.store.state = {
-            "version": 1, "capital_fraction": self.config.capital.mm_fraction,
+            "version": 2, "capital_fraction": self.config.capital.mm_fraction,
             "initial_equity": equity, "rxm_capital": equity-capital,
             "expected_cash_assets": self._physical_cash_assets(),
             "rxm_fees": 0.0,
@@ -250,6 +312,9 @@ class AccountCoordinator:
             "rxm_cost": {c: total_quantity(wallet_of(self.balance), c)*snapshot["prices"].get(c, 0) for c in wallet_of(self.balance) if c != "USD"},
             "rxm_quantity": {c: total_quantity(wallet_of(self.balance), c) for c in wallet_of(self.balance) if c != "USD"},
             "short_quantity": {p["Pair"]: float(p["ShortQty"]) for p in self.shorts["Positions"]},
+            "short_collateral": {p["Pair"]: float(p["Collateral"]) for p in self.shorts["Positions"]},
+            "short_settlement_adjustment": sum(float(p["ShortQty"])*(float(p["CurrentPrice"])-float(p["EntryPrice"]))
+                                               for p in self.shorts["Positions"]),
             "mm": {c: {"capital": capital*w, "cash": capital*w, "quantity": 0.0,
                        "cost": 0.0, "fees": 0.0, "realized_pnl": 0.0} for c, w in self.config.allocations.items()},
             "orders": {}, "features": {}, "next_refresh": None, "batch": None,
@@ -532,19 +597,31 @@ class AccountCoordinator:
 
     def _apply_recovered_short(self, o, pair, position, moved):
         """Position evidence shows the lost short request executed: book it from the venue's numbers."""
-        self.state["short_quantity"][pair] = float(position.get("ShortQty", 0))
+        owned_before = self.state["short_quantity"].get(pair, 0.)
+        self.state["short_quantity"][pair] = self.state["short_quantity"].get(pair, 0.) + moved
+        if self.state.get("version") == 2:
+            old_collateral = self.state["short_collateral"].get(pair, 0.)
+            self.state["short_collateral"][pair] = (old_collateral + o["collateral"] if moved > 0
+                else old_collateral*max(0., 1+moved/owned_before) if owned_before else 0.)
         if o["side"] == "SHORT_OPEN":
             fee = o["collateral"] * self.fees.short_open
-            self.state["short_basis"][pair] = self.state["short_basis"].get(pair, 0) + moved * float(position.get("EntryPrice", 0) or 0)
+            added = (float(position.get("ShortQty", 0))*float(position.get("EntryPrice", 0)) - o["before_venue_short_basis"]
+                     if "before_venue_short_basis" in o else moved*float(position.get("EntryPrice", 0)))
+            self.state["short_basis"][pair] = self.state["short_basis"].get(pair, 0) + added
             self.state["expected_cash_assets"] -= fee
             self.state["rxm_fees"] += fee
         else:
-            ratio = min(1.0, -moved / max(float(o.get("before_short_qty") or 0), 1e-12))
+            ratio = min(1.0, -moved / max(owned_before, 1e-12))
             self.state["short_basis"][pair] = self.state["short_basis"].get(pair, 0) * max(0.0, 1 - ratio)
             # Realized P&L and fee are not known without the response: re-baseline RXM's residual cash
             # to the venue in this sync (MM books are untouched; RXM cash is the account remainder).
             # Kept in the durable state: the FILLED intent leaves the active set at the next save.
             self.state.setdefault("rebaseline_for", []).append(o["intent_id"])
+        if self.state.get("version") == 2:
+            owned_basis = sum(self.state["short_basis"].values()) + sum(
+                p["basis"] for p in self.extra_positions() if p["side"] == "short")
+            venue_basis = sum(float(p["ShortQty"])*float(p["EntryPrice"]) for p in self.shorts["Positions"])
+            self.state["short_settlement_adjustment"] = owned_basis-venue_basis
         o["status"] = "FILLED"
         self.store.save("short_recovered", {"intent": o["intent_id"], "side": o["side"], "moved": moved})
 
@@ -556,6 +633,10 @@ class AccountCoordinator:
             expected[c] = expected.get(c, 0) + b["quantity"]
             if b["cash"] < -1e-7 or b["quantity"] < -1e-7:
                 findings.append((f"strategy:{MM}", f"MM book {c} negative (cash {b['cash']:.8f}, qty {b['quantity']!r})", "material"))
+        for position in self.extra_positions():
+            if position["side"] == "long":
+                c = position["symbol"]
+                expected[c] = expected.get(c, 0) + position["quantity"]
         for c in set(expected) | (set(wallet)-{"USD"}):
             actual, ledger = total_quantity(wallet, c), expected.get(c, 0)
             # Adding/subtracting billion-unit meme-coin lots can leave a few
@@ -569,12 +650,13 @@ class AccountCoordinator:
         actual_shorts = {p["Pair"]: float(p["ShortQty"]) for p in self.shorts["Positions"]}
         unresolved_pairs = {to_pair(o["coin"]) for o in self.active() if o["status"] == "SUBMITTING"
                             and o["side"] in {"SHORT_OPEN", "SHORT_CLOSE"}}
-        for pair in set(actual_shorts) | set(self.state["short_quantity"]):
+        short_pairs = {to_pair(p["symbol"]) for p in self.extra_positions() if p["side"] == "short"}
+        for pair in set(actual_shorts) | set(self.state["short_quantity"]) | short_pairs:
             if pair in unresolved_pairs:
                 continue                                  # already reported by _recover_shorts
-            if not math.isclose(actual_shorts.get(pair, 0), self.state["short_quantity"].get(pair, 0), rel_tol=1e-8, abs_tol=1e-7):
+            if not math.isclose(actual_shorts.get(pair, 0), self.total_short_quantity(pair), rel_tol=1e-8, abs_tol=1e-7):
                 findings.append((f"short:{pair}", f"short mismatch: actual {actual_shorts.get(pair, 0)!r}, "
-                                 f"ledger {self.state['short_quantity'].get(pair, 0)!r}", "material"))
+                                 f"ledger {self.total_short_quantity(pair)!r}", "material"))
         findings += self._reconcile_cash()
         snapshot = normalize_exchange_snapshot(self.balance, self.shorts, self.tickers, self.pending)
         if snapshot['unpriced']:
@@ -696,6 +778,10 @@ class AccountCoordinator:
             pair = to_pair(o["coin"])
             self.state["short_quantity"][pair] = self.state["short_quantity"].get(pair, 0) + delta
             self.state["short_basis"][pair] = self.state["short_basis"].get(pair, 0) + value_delta
+            if self.state.get("version") == 2:
+                collateral = o.get("collateral", o["quantity"]*o["price"])
+                self.state["short_collateral"][pair] = self.state["short_collateral"].get(pair, 0) + (
+                    collateral*delta/o["quantity"] if o["quantity"] else 0.)
             if status in {"CANCELED", "REJECTED"} and o["status"] not in TERMINAL:
                 refund = o.get("open_fee", o["quantity"]*o["price"]*self.fees.short_open) if not filled else 0.0
                 self.state["expected_cash_assets"] += refund
@@ -746,8 +832,14 @@ class AccountCoordinator:
 
     def rxm_free_cash(self):
         # The physical exchange does not reserve pending spot fees, our ledgers do.
+        if self.state.get("version") == 2:
+            records = legacy_records(self.state, other_cash=sum(a["cash"] for a in self.extra_accounts()),
+                                     other_collateral=sum(p["collateral"] for p in self.extra_positions()))
+            cash = next(a["cash"] for a in records["accounts"] if a["strategy"] == "rxm")
+            return cash-sum(r["cash"] for r in records["reservations"] if r["strategy"] == "rxm")
         fees = sum(remaining(o)*o["price"]*self.fees.spot_maker for o in self.active() if o["side"] == "BUY")
-        return float(wallet_of(self.balance)["USD"]["Free"]) - self.mm_free_cash() - fees
+        return (float(wallet_of(self.balance)["USD"]["Free"]) - self.mm_free_cash() - fees
+                - sum(a["cash"] for a in self.extra_accounts()))
 
     def view_balance(self, strategy):
         if strategy != "rxm":
@@ -758,11 +850,53 @@ class AccountCoordinator:
         wallet["USD"]["Free"] = max(0.0, self.rxm_free_cash()+rxm_fees)
         # Keep RXM's short collateral display, subtract MM resting principal only.
         mm_locked = sum(remaining(o)*o["price"] for o in self.active(MM) if o["side"] == "BUY")
-        wallet["USD"]["Lock"] = max(0.0, float(wallet["USD"].get("Lock", 0))-mm_locked)
+        other_collateral = sum(p["collateral"] for p in self.extra_positions())
+        wallet["USD"]["Lock"] = max(0.0, float(wallet["USD"].get("Lock", 0))-mm_locked-other_collateral)
+        if self.state.get("version") == 2:
+            wallet["USD"]["Lock"] = sum(self.state["short_collateral"].values()) + sum(
+                remaining(o)*o["price"] for o in self.active("rxm") if o["side"] in {"BUY", "SHORT_OPEN"})
         _, held = self.reservations("rxm")
         for c in set(wallet)-{"USD"} | set(self.state["rxm_quantity"]):
             total = self.state["rxm_quantity"].get(c, 0)
             wallet[c] = {"Free": max(0.0, total-held.get(c, 0)), "Lock": held.get(c, 0)}
+        return {"Success": True, "SpotWallet": wallet}
+
+    def owned_short_view(self, strategy, pair_id=None):
+        if strategy == "rxm" and self.state.get("version") == 1:
+            return deepcopy(self.shorts)
+        if strategy == "rxm":
+            positions = [dict(symbol=to_coin(pair), quantity=q, basis=self.state["short_basis"].get(pair, 0.),
+                collateral=self.state.get("short_collateral", {}).get(pair))
+                for pair, q in self.state["short_quantity"].items() if q > 0]
+        else:
+            positions = [p for p in self.owned_positions(strategy, pair_id) if p["side"] == "short"]
+        grouped = {}
+        for p in positions:
+            pair = to_pair(p["symbol"])
+            existing = next((x for x in self.shorts["Positions"] if x["Pair"] == pair), {})
+            row = grouped.setdefault(pair, dict(existing, Pair=pair, ShortQty=0., Collateral=0., basis=0.))
+            row["ShortQty"] += p["quantity"]
+            row["basis"] += p["basis"]
+            row["Collateral"] += p["collateral"] if p["collateral"] is not None else float(existing.get("Collateral", 0))
+        for pair, row in grouped.items():
+            row["EntryPrice"] = row.pop("basis")/row["ShortQty"]
+            row["CurrentPrice"] = float(self.tickers["Data"][pair]["LastPrice"])
+            row["UnrealizedPNL"] = row["ShortQty"]*(row["EntryPrice"]-row["CurrentPrice"])
+        return {"Success": True, "Positions": list(grouped.values())}
+
+    def owned_balance_view(self, strategy, pair_id=None):
+        accounts = [a for a in self.store.ownership.accounts(strategy) if pair_id is None or a["pair_id"] == pair_id]
+        if not accounts:
+            raise ValueError("strategy/pair has no physical account allocation")
+        positions = self.owned_positions(strategy, pair_id)
+        reserved = sum(r[0] for r in self.store.db.execute(
+            "SELECT cash FROM owner_reservations WHERE strategy=? AND (? IS NULL OR pair_id=?)",
+            (strategy, pair_id, pair_id)))
+        wallet = {"USD": dict(Free=sum(a["cash"] for a in accounts)-reserved,
+                               Lock=reserved+sum(p["collateral"] for p in positions))}
+        for p in positions:
+            if p["side"] == "long":
+                wallet.setdefault(p["symbol"], dict(Free=0., Lock=0.))["Free"] += p["quantity"]
         return {"Success": True, "SpotWallet": wallet}
 
     def _crosses(self, coin, side, price, exclude=None):
@@ -980,28 +1114,34 @@ class AccountCoordinator:
                                     gross_inventory=value, net_inventory=value, collateral=0.0,
                                     spot_fees=b["fees"], short_open_fees=0.0, short_close_fees=0.0,
                                     unrealized_pnl=value-b["cost"], net_pnl=b["cash"]+value-b["capital"])
-        out["rxm"] = normalize_exchange_snapshot(self.view_balance("rxm"), self.shorts, self.tickers,
+        rxm_shorts = self.owned_short_view("rxm")
+        out["rxm"] = normalize_exchange_snapshot(self.view_balance("rxm"), rxm_shorts, self.tickers,
                                                   self.scoped("rxm").list_open_orders())
         rxm = out["rxm"]
         unrealized = (sum(rxm["longs"].values())-sum(self.state["rxm_cost"].values())
                       + sum(self.state["short_basis"].get(p["Pair"], 0)-float(p["ShortQty"])*float(p["CurrentPrice"])
-                            for p in self.shorts["Positions"]))
+                            for p in rxm_shorts["Positions"]))
         net_pnl = rxm["equity_usd"]-self.state["rxm_capital"]
         rxm.update(capital=self.state["rxm_capital"], available_cash=self.rxm_free_cash(),
                    fees=self.state["rxm_fees"], realized_pnl=net_pnl-unrealized, unrealized_pnl=unrealized,
                    net_pnl=net_pnl,
                    gross_inventory=sum(rxm["longs"].values())+sum(rxm["shorts"].values()),
                    net_inventory=sum(rxm["longs"].values())-sum(rxm["shorts"].values()))
+        if self.state.get("version") == 2:
+            out.update(owner_accounts=self.store.ownership.accounts(), owned_positions=self.store.ownership.positions(),
+                       short_settlement_adjustment=self.state.get("short_settlement_adjustment", 0.))
         return out
 
-    def scoped(self, strategy):
-        return StrategyAccountPort(self, strategy)
+    def scoped(self, strategy, pair_id=None):
+        return StrategyAccountPort(self, strategy, pair_id)
 
 
 class StrategyAccountPort:
-    """Temporary MM/RXM transport views and strategy-specific order restrictions."""
-    def __init__(self, account, strategy):
-        self.account, self.strategy = account, strategy
+    """Owner-scoped reads; order submission remains MM/RXM-only until step 4."""
+    def __init__(self, account, strategy, pair_id=None):
+        if pair_id is not None and strategy in LEGACY:
+            raise ValueError("legacy transport is strategy-scoped; use owned_positions for leg reads")
+        self.account, self.strategy, self.pair_id = account, strategy, pair_id
         self.is_live = bool(getattr(account.port, "is_live", False))
 
     def get_exchange_info(self):
@@ -1013,10 +1153,14 @@ class StrategyAccountPort:
 
     def get_balance(self):
         self.account.refresh_balance_if_stale()
+        if self.strategy not in LEGACY:
+            return self.account.owned_balance_view(self.strategy, self.pair_id)
         return self.account.view_balance(self.strategy)
 
     def get_short_positions(self):
-        return deepcopy(self.account.shorts) if self.strategy == "rxm" else {"Success": True, "Positions": []}
+        if self.strategy == MM:
+            return {"Success": True, "Positions": []}
+        return self.account.owned_short_view(self.strategy, self.pair_id)
 
     def list_open_orders(self):
         return {"Success": True, "OrderMatched": [deepcopy(o["row"]) for o in self.account.active(self.strategy) if "row" in o]}
@@ -1088,7 +1232,9 @@ class StrategyAccountPort:
         px = float(price or a.tickers["Data"][pair]["LastPrice"])
         o = a._record("rxm", coin, "SHORT_OPEN", collateral/px, px)
         o.update(collateral=collateral, limit=price is not None,
-                 before_short_qty=a.state["short_quantity"].get(pair, 0.0))
+                 before_short_qty=a.total_short_quantity(pair),
+                 before_venue_short_basis=sum(float(p["ShortQty"])*float(p["EntryPrice"])
+                     for p in a.shorts["Positions"] if p["Pair"] == pair))
         a.orders[o["intent_id"]] = o
         o["status"] = "SUBMITTING"
         a.store.save("short_submitting", o)     # durable before the request leaves
@@ -1108,7 +1254,7 @@ class StrategyAccountPort:
                 before = next((p for p in a.shorts["Positions"] if p["Pair"] == pair), {})
                 previous_entry_value = float(before.get("ShortQty", 0))*float(before.get("EntryPrice", 0))
                 added_entry_value = float(r["ShortQty"])*float(r["EntryPrice"])-previous_entry_value
-                new_qty = float(r["ShortQty"])
+                new_qty = a.state["short_quantity"].get(pair, 0.) + float(r["ShortQty"]) - o["before_short_qty"]
             else:
                 order_id = str(r["ID"])
                 # The venue can round the accepted short size to its amount precision.
@@ -1124,6 +1270,14 @@ class StrategyAccountPort:
         if price is None:
             a.state["short_basis"][pair] = a.state["short_basis"].get(pair, 0)+added_entry_value
             a.state["short_quantity"][pair] = new_qty
+            if a.state.get("version") == 2:
+                a.state["short_collateral"][pair] = a.state["short_collateral"].get(pair, 0.) + collateral
+            cached = next((p for p in a.shorts["Positions"] if p["Pair"] == pair), None)
+            if cached is None:
+                cached = {"Pair": pair, "CurrentPrice": px}
+                a.shorts["Positions"].append(cached)
+            cached.update(ShortQty=float(r["ShortQty"]), EntryPrice=float(r["EntryPrice"]),
+                          Collateral=float(r.get("Collateral", a.state.get("short_collateral", {}).get(pair, collateral))))
             o["status"] = "FILLED"
         else:
             o.update(order_id=order_id, status="PENDING", open_fee=fee)
@@ -1146,8 +1300,13 @@ class StrategyAccountPort:
             return {"Success": False, "ErrMsg": "account self-cross"}
         before = a.state["short_quantity"].get(pair, 0.0)
         expected = float(close_qty) if close_qty is not None else before * float(close_pct or 0) / 100
+        if not math.isfinite(expected) or expected <= 0 or expected > before*(1+1e-12):
+            return {"Success": False, "ErrMsg": "RXM owned short quantity exceeded"}
+        if a.total_short_quantity(pair) > before*(1+1e-12):
+            # Percentages on the venue refer to every owner's merged position.
+            close_qty, close_pct = expected, None
         o = a._record("rxm", coin, "SHORT_CLOSE", expected, 0)
-        o.update(before_short_qty=before)
+        o.update(before_short_qty=a.total_short_quantity(pair), before_owned_short_qty=before)
         a.orders[o["intent_id"]] = o
         o["status"] = "SUBMITTING"
         a.store.save("cover_submitting", o)
@@ -1167,8 +1326,15 @@ class StrategyAccountPort:
         a.state["expected_cash_assets"] += pnl - fee
         a.state["rxm_fees"] += fee
         ratio = closed / before if before else 1.0
+        if a.state.get("version") == 2:
+            physical = next(p for p in a.shorts["Positions"] if p["Pair"] == pair)
+            venue_basis = float(physical["EntryPrice"])*closed
+            own_basis = a.state["short_basis"].get(pair, 0.)*ratio
+            a.state["short_settlement_adjustment"] += venue_basis-own_basis
         a.state["short_basis"][pair] = a.state["short_basis"].get(pair, 0) * max(0.0, 1-ratio)
         a.state["short_quantity"][pair] = before - closed
+        if a.state.get("version") == 2:
+            a.state["short_collateral"][pair] = a.state["short_collateral"].get(pair, 0.) * max(0., 1-ratio)
         o["status"] = "FILLED"
         a.store.save("cover_result", r)
         return r

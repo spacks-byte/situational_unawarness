@@ -1,0 +1,141 @@
+{
+  "case": "fortnight_43",
+  "test_start": "2026-08-21T00:00:00Z",
+  "test_end": "2026-09-04T00:00:00Z",
+  "initial_capital_usdt": 10000.0,
+  "source": "https://data-api.binance.vision/api/v3",
+  "interval": "30m",
+  "data_start": "2026-06-21T23:30:00+00:00",
+  "data_end_exclusive": "2026-09-04T00:00:00Z",
+  "assets": {
+    "1000CHEEMS": {
+      "path": "data/1000CHEEMSUSDT_30m.csv.gz",
+      "sha256": "1ca1233d3ea98a8e742377bee8dab50f75d7345336529262491bd2eca8ee64fd",
+      "rows": 3553,
+      "original_csv_sha256": "7eaab8fb2ef63839d929d77d75319de5fdff89b1d0d141d9550a45d304515a02"
+    },
+    "AVNT": {
+      "path": "data/AVNTUSDT_30m.csv.gz",
+      "sha256": "d84b1f55f31c7e28c582fc16f1c74678d884aabd179858ffb4b357d3b408f754",
+      "rows": 3553,
+      "original_csv_sha256": "b52a2e2f54b47b969e078d8e024330ddaad60591a8da86922fe49513ee44eed0"
+    },
+    "BIO": {
+      "path": "data/BIOUSDT_30m.csv.gz",
+      "sha256": "d33d1b2c8ebd257a31a7a899bcb4c1e674bc0bc191c8752c1c88a797baee0e3e",
+      "rows": 3553,
+      "original_csv_sha256": "49cd58014cc4f0e90c915096a3a05a48de992b0505acf20cd126b52862adbacc"
+    },
+    "BNB": {
+      "path": "data/BNBUSDT_30m.csv.gz",
+      "sha256": "34a57461385c9c10fdd216b440b9cb10dd508a272d56e62287a04b14bf8d6aa2",
+      "rows": 3553,
+      "original_csv_sha256": "f9dc997a2055c378ae56abab23f28283124c5d6a2dc3483f7ae5cfc68b0c08a4"
+    },
+    "CAKE": {
+      "path": "data/CAKEUSDT_30m.csv.gz",
+      "sha256": "02711c1e90ad418f486c27547463bfbfa6a68badb066ad03f8070f0296b5aee6",
+      "rows": 3553,
+      "original_csv_sha256": "6b31852c7b13148e315dbe666f35d715cddbec985197ae79beb6e0a1ae0b7d3b"
+    },
+    "CFX": {
+      "path": "data/CFXUSDT_30m.csv.gz",
+      "sha256": "296bb573738279ce9e044872f1a7de7a544251957d0caead60a923ad76026bc7",
+      "rows": 3553,
+      "original_csv_sha256": "ae657e13af8cc04ef9e3797090f29d92e3c017eea72a4ab4e8899748a5656d71"
+    },
+    "EDEN": {
+      "path": "data/EDENUSDT_30m.csv.gz",
+      "sha256": "9394a3f556093cd01a8d3bf54c760db7f15f44a6fab1c09c1dfc37e46074088b",
+      "rows": 3553,
+      "original_csv_sha256": "e76f35a3aab5ae6476dd66d111293c1c21ae0d6e5ec9ad780df469bcddfb5784"
+    },
+    "EIGEN": {
+      "path": "data/EIGENUSDT_30m.csv.gz",
+      "sha256": "a2dcf658a0a84bfb517fb1c2d620aa423739003119975492424794377f21d704",
+      "rows": 3553,
+      "original_csv_sha256": "97c337ba5488ac278f216d30323cc8f59f6a7131a2924289a35d825be918a18d"
+    },
+    "ENA": {
+      "path": "data/ENAUSDT_30m.csv.gz",
+      "sha256": "07fafa9c8ad90293780b57bd108bf6bb6238c35e23730b4289b2d43774241a7f",
+      "rows": 3553,
+      "original_csv_sha256": "91ffe453396cb7ee72e47d928b2d68e5d7533b9b9b9804bc7f5c7145bb7f325b"
+    },
+    "FET": {
+      "path": "data/FETUSDT_30m.csv.gz",
+      "sha256": "9528d6f90291a9482c7824c57f5f9df53f81d634dd9a2dc610be007b1fcbe5da",
+      "rows": 3553,
+      "original_csv_sha256": "ca75f4dc70ff24cf8177fada967aed358b2a13e8e316ecbcbf749366ccefaca6"
+    },
+    "FIL": {
+      "path": "data/FILUSDT_30m.csv.gz",
+      "sha256": "17d5edccdd4180385a8423a4b3a835d9b17878a765d6820b10ff4163bbb56c32",
+      "rows": 3553,
+      "original_csv_sha256": "215a8706725f85d0bafcd72f322383db78280ee48adfdda86d239795763e1f7c"
+    },
+    "FORM": {
+      "path": "data/FORMUSDT_30m.csv.gz",
+      "sha256": "97919e49ef5e666fc7a1669c80ab7fd4e75a7c43bfe3fc20c2ac789ad1d0d2e0",
+      "rows": 3553,
+      "original_csv_sha256": "770166c7cdcafc99cf191c887372a8333eb44667141aeb44b382556bd4bbb099"
+    },
+    "HEMI": {
+      "path": "data/HEMIUSDT_30m.csv.gz",
+      "sha256": "0690eeaee5bc0a8eea2793c7a596c4ae60953248dbc37e6364739f08b20ad2da",
+      "rows": 3553,
+      "original_csv_sha256": "05247c1a91f1f87560d30dafbe0ffe4ff47fae0de20befba7168aac4cfa71461"
+    },
+    "LISTA": {
+      "path": "data/LISTAUSDT_30m.csv.gz",
+      "sha256": "5d164970b5b7567e23341dd5cba5a9854c32c78c23978e32311766cf344b7372",
+      "rows": 3553,
+      "original_csv_sha256": "3c53f4d07925bb0ddd9816f355332f5166abfd01672cedf77488ff2a29568e98"
+    },
+    "LTC": {
+      "path": "data/LTCUSDT_30m.csv.gz",
+      "sha256": "8cefbd078759f825bd030a4411dd5924a5d49b518c2742fb688b124f82a3171a",
+      "rows": 3553,
+      "original_csv_sha256": "b5aea1ec46eab6c6dabfb7ca49a60bbf62b639906f2aad024d1d189a7e29c622"
+    },
+    "MIRA": {
+      "path": "data/MIRAUSDT_30m.csv.gz",
+      "sha256": "47dcdf3fa380371d09226d22f2093f8f62811ed6101eef48a8edf8299263d0c3",
+      "rows": 3553,
+      "original_csv_sha256": "06b4134e22979f9c755ad03ef89f73fe3762ae998767f660c11499f719f63587"
+    },
+    "ONDO": {
+      "path": "data/ONDOUSDT_30m.csv.gz",
+      "sha256": "57f15595d16c0c7dbfb0bc4d6a7eb607ea4877125fe012ea8e4c6122ae58b537",
+      "rows": 3553,
+      "original_csv_sha256": "fe6085794ca2024bc14144e7c2f3d93533c05a37fb98d790cc6020d55e7bcc8d"
+    },
+    "POL": {
+      "path": "data/POLUSDT_30m.csv.gz",
+      "sha256": "4c236315bf992ea2eccf14fb48bad40836b1add3a515f6a83c7b420e41e62e57",
+      "rows": 3553,
+      "original_csv_sha256": "9410f9f9c56ab18acab607ba6c42f05ac7bbca67051118da177a21087454e7b8"
+    },
+    "TAO": {
+      "path": "data/TAOUSDT_30m.csv.gz",
+      "sha256": "5f3d4683e599365188c333021992f992ace3b7e963744fe61551ce4a5cc2bb03",
+      "rows": 3553,
+      "original_csv_sha256": "cd6670a004a4b4976f3dbc328f041a54a2db4fa304c41d3130a349976298652e"
+    },
+    "TUT": {
+      "path": "data/TUTUSDT_30m.csv.gz",
+      "sha256": "bb6c90557a5b0a83fec478d261a0b8970e388a285e82bb3c1a606930ba05323b",
+      "rows": 3553,
+      "original_csv_sha256": "371f3532c904dd81d1904a5eb3a542fc7deb5359b3118c31b270992636413311"
+    }
+  },
+  "source_run": "search_20261005T124335Z/inverse_volatility_2026/window_43",
+  "expected_sha256": {
+    "asset_net_exposure.csv": "bbef96cc7006f245072bd56462a15ca20641c506ef4c0e3427ce6d468449dc3c",
+    "pair_metrics.csv": "4674105f515a899d60841539deb0eca7e0fe3202036217f4ba685eb223e95343",
+    "portfolio_equity.csv": "aaf9466abe569adde4e8fad25b6f3a43587f72d81930839d861c93eea931410b",
+    "summary.json": "294d15bc81c078753ad0e858dcc53376152cf98c88677739f85946fd81542257",
+    "trades.csv": "6e686d230b208c4b22ba14ed17cf1f7484e181aa525fa655e4c0fd3638e4fd65",
+    "weights.csv": "25ed04924890fe53189f879b912165246ee0accef8decd432fb2318a132dbf57"
+  }
+}

@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "strategy_id": "cointegration_pairs_inverse_vol_v1",
+  "strategy": "baseline",
+  "market_data": {
+    "venue": "Binance",
+    "market": "spot",
+    "quote": "USDT",
+    "interval": "30m",
+    "timezone": "UTC",
+    "timestamp": "candle_open"
+  },
+  "portfolio": {
+    "reference_capital_usdt": 10000.0,
+    "entry_gross_budget_multiple": 1.0,
+    "weighting": "inverse_pair_volatility",
+    "volatility_days": 60,
+    "return_proxy": "0.5 * (daily_simple_return_A - daily_simple_return_B)",
+    "ddof": 1,
+    "idle_allocations": "retain_in_cash",
+    "weight_refresh": "at_reset_start_then_frozen",
+    "leg_sizing": "equal_entry_dollars_fixed_quantities"
+  },
+  "engine": {
+    "interval_minutes": 30,
+    "train_days": 60,
+    "z_window_days": 20,
+    "max_hold_days": 14,
+    "fee_bps": 5,
+    "slippage_bps": 2,
+    "short_carry_bps_per_day": 0,
+    "short_fee_bps": 10
+  },
+  "pairs": [
+    {
+      "pair": "FIL-MIRA",
+      "entry_z": 1.5,
+      "exit_z": 0.3
+    },
+    {
+      "pair": "AVNT-MIRA",
+      "entry_z": 2.25,
+      "exit_z": 0.7
+    },
+    {
+      "pair": "EIGEN-ONDO",
+      "entry_z": 1.75,
+      "exit_z": 0.001
+    },
+    {
+      "pair": "HEMI-TUT",
+      "entry_z": 2.5,
+      "exit_z": 0.1
+    },
+    {
+      "pair": "HEMI-POL",
+      "entry_z": 2.25,
+      "exit_z": 0.02
+    },
+    {
+      "pair": "FORM-TAO",
+      "entry_z": 2.25,
+      "exit_z": 0.05
+    },
+    {
+      "pair": "1000CHEEMS-TAO",
+      "entry_z": 2.0,
+      "exit_z": 0.15
+    },
+    {
+      "pair": "EDEN-LTC",
+      "entry_z": 2.0,
+      "exit_z": 0.3
+    },
+    {
+      "pair": "CAKE-POL",
+      "entry_z": 1.5,
+      "exit_z": 0.001
+    },
+    {
+      "pair": "BIO-EIGEN",
+      "entry_z": 3.0,
+      "exit_z": 0.7
+    },
+    {
+      "pair": "CFX-ENA",
+      "entry_z": 2.5,
+      "exit_z": 0.2
+    },
+    {
+      "pair": "AVNT-FET",
+      "entry_z": 2.25,
+      "exit_z": 0.001
+    },
+    {
+      "pair": "BNB-LISTA",
+      "entry_z": 2.75,
+      "exit_z": 0.31
+    }
+  ],
+  "risk": {
+    "coin_exposure_cap_enabled": false,
+    "coin_exposure_cap_pct": null,
+    "pair_weight_cap_enabled": false,
+    "volatility_target_enabled": false,
+    "stop_loss_enabled": false,
+    "coin_exposure_reporting_enabled": true
+  },
+  "research_schedule": {
+    "test_days": 14,
+    "start_flat": true,
+    "force_close_at_end": true,
+    "capital_resets": true,
+    "compound_returns": false
+  },
+  "deployment": {
+    "order_adapter_included": false,
+    "live_market_mapping": null,
+    "live_start_time_utc": null,
+    "live_refit_reweight_schedule": null,
+    "live_cycle_boundary_position_policy": null,
+    "live_capital_compounding_policy": null,
+    "unfilled_and_partial_order_policy": null
+  }
+}

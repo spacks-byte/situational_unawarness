@@ -37,9 +37,9 @@ def parquet_fetch(data_dir: str | Path, interval: str = "15m") -> FetchFn:
 def binance_public_fetch(base_url: str = BINANCE_DATA_API, session=None, timeout: float = 10.0, interval: str = "15m") -> FetchFn:
     """Live fetch from Binance public klines (`/api/v3/klines`, no credentials), 1000 bars per request."""
 
-    if interval not in {"15m", "1s"}:
+    if interval not in {"15m", "30m", "1s"}:
         raise ValueError("unsupported live candle interval")
-    interval_ms = 1000 if interval == "1s" else 900_000
+    interval_ms = {"1s": 1000, "15m": 900_000, "30m": 1_800_000}[interval]
     http = session
 
     def fetch(coin: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:

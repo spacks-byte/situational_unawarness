@@ -1,0 +1,142 @@
+{
+  "case": "recent_24h",
+  "test_start": "2026-10-05T17:30:00Z",
+  "test_end": "2026-10-06T17:30:00Z",
+  "initial_capital_usdt": 10000.0,
+  "source": "https://data-api.binance.vision/api/v3",
+  "interval": "30m",
+  "data_start": "2026-08-06T17:00:00+00:00",
+  "data_end_exclusive": "2026-10-06T17:30:00Z",
+  "assets": {
+    "1000CHEEMS": {
+      "path": "data/1000CHEEMSUSDT_30m.csv.gz",
+      "sha256": "2b2461e75257519aa788b00ec912952455575f94c036697961c09b84a82c9c45",
+      "rows": 2929,
+      "original_csv_sha256": "d5d4c7c28d0252834bb3c1fe6ddfb530f94c436a7f4374669727253b808f3a65"
+    },
+    "AVNT": {
+      "path": "data/AVNTUSDT_30m.csv.gz",
+      "sha256": "5f3fe6dea41691c8cc3230274f9cf4085f63ca476dca9c32202bd19a60bcbb95",
+      "rows": 2929,
+      "original_csv_sha256": "e9c38cd02fc92118c1a59b67a6cf919d35543c7cdbf3db1913c39aaf0ffc2700"
+    },
+    "BIO": {
+      "path": "data/BIOUSDT_30m.csv.gz",
+      "sha256": "4993133f6d72e445999830877e632b4837589cd78f48083b48290f49d54fc441",
+      "rows": 2929,
+      "original_csv_sha256": "0dc59213b69613407693c5683a80e12201683c58b5f69e28082d8e8e0599c1c3"
+    },
+    "BNB": {
+      "path": "data/BNBUSDT_30m.csv.gz",
+      "sha256": "e14b505bca33adc43000431e3e4b6a2498a42bba2430b30d55c3fe7541542c95",
+      "rows": 2929,
+      "original_csv_sha256": "54005042748ae8ca7b379dbede0155434b68fea3c447e5b3f5d8daf4c1f38631"
+    },
+    "CAKE": {
+      "path": "data/CAKEUSDT_30m.csv.gz",
+      "sha256": "1482594e01ee05ec2193525c452dabf76d7da471557f6072b29cc2d6b01febe9",
+      "rows": 2929,
+      "original_csv_sha256": "0f2e75209df2b9908d91947c54e05d27bc22b92bdb1b61b6f871b1d02c76a816"
+    },
+    "CFX": {
+      "path": "data/CFXUSDT_30m.csv.gz",
+      "sha256": "eb43ff6ba95a276b78bd31635d6b268d442142ed94c76e7fc76cddd622ef633c",
+      "rows": 2929,
+      "original_csv_sha256": "b3a2962005e7a83ace9e40ceb741de6eab4ee696d74369eeba506cd58ee8c30d"
+    },
+    "EDEN": {
+      "path": "data/EDENUSDT_30m.csv.gz",
+      "sha256": "e5a834175f7754475e4b611deda5e835ae109def05a3496b9d9b1732cb7de2e6",
+      "rows": 2929,
+      "original_csv_sha256": "3ac32bf4062d55aeac5254b25a5da11b17d7e0f18282055fbf24f24c86301bf7"
+    },
+    "EIGEN": {
+      "path": "data/EIGENUSDT_30m.csv.gz",
+      "sha256": "59ae64988aa5aab8cbbfb4d5b5e0d8f6859f8c16081b4f8491e3523a12fc53df",
+      "rows": 2929,
+      "original_csv_sha256": "24be6a6d18173ea7db9b007a747962e8ccc5199b96dbc5877e996bf700cf4976"
+    },
+    "ENA": {
+      "path": "data/ENAUSDT_30m.csv.gz",
+      "sha256": "a2fe52940876c960fc94fe6bae77f0569491f075603d931c52061ddc88ace6da",
+      "rows": 2929,
+      "original_csv_sha256": "45ed2c64ef0919f49a29d58bf69c9d291b711cc37d552884d826f0577001fbf0"
+    },
+    "FET": {
+      "path": "data/FETUSDT_30m.csv.gz",
+      "sha256": "8f13f3a6c44898051e933647fcf9bb26beb554416c37ea9bffbbc8f2379fc799",
+      "rows": 2929,
+      "original_csv_sha256": "9c6dd359d773d2c33db4693422ce1da7321e4ccfb880dc2f179315d2ac81305a"
+    },
+    "FIL": {
+      "path": "data/FILUSDT_30m.csv.gz",
+      "sha256": "dbd7fcb66beff40792c626f89ff530b84308df7c14e4184535a2d4ac183d8253",
+      "rows": 2929,
+      "original_csv_sha256": "5c39e46b215d4dd36aa91e4daa292119a81e230d1ff9b0c3824b9aa77527a998"
+    },
+    "FORM": {
+      "path": "data/FORMUSDT_30m.csv.gz",
+      "sha256": "4e91ec34e507b1b50d38c975b7ebee44713c31a00d5219987d65e146cf40048f",
+      "rows": 2929,
+      "original_csv_sha256": "ae5be753e7100aa11578239395101d7127511adf7ea4c017d3be29e6d1988af5"
+    },
+    "HEMI": {
+      "path": "data/HEMIUSDT_30m.csv.gz",
+      "sha256": "9ce4837891e314eeb61befd574df8e75c1e5db1c07be1f8f75eac657d9b576b4",
+      "rows": 2929,
+      "original_csv_sha256": "6e9b78ee6916b6bd898c54fd06492e0aaf3d257d7c898990e4059138a120f07e"
+    },
+    "LISTA": {
+      "path": "data/LISTAUSDT_30m.csv.gz",
+      "sha256": "362865469726f3a4ca13b85f34f208ea554f4a42b239e63c85a066d0cb5bfb47",
+      "rows": 2929,
+      "original_csv_sha256": "1af06cc506ccb46f429a7f04c5e93025c4c82a9e1841c76dd1c3d30d95397dc0"
+    },
+    "LTC": {
+      "path": "data/LTCUSDT_30m.csv.gz",
+      "sha256": "d580637b8ab6960f0a60c961099507c82f5c235718f44c869a1a56c003076b5e",
+      "rows": 2929,
+      "original_csv_sha256": "4ef14b38b79c950879447477e9098cd3728282c1b4c0a5ac40ad76b69e946204"
+    },
+    "MIRA": {
+      "path": "data/MIRAUSDT_30m.csv.gz",
+      "sha256": "092a8576d85d2a8fb226cacfd65996717bfc44eef7e62e6f7e041c8682f1e77b",
+      "rows": 2929,
+      "original_csv_sha256": "d11f010f5571f5a732f4e208eaff9a2eed31149867b335fc3a23c20cc8b29a0f"
+    },
+    "ONDO": {
+      "path": "data/ONDOUSDT_30m.csv.gz",
+      "sha256": "1d30fc510f102018ed84316d63e5b33880a7e1cfb909201371771cfe4fd67503",
+      "rows": 2929,
+      "original_csv_sha256": "832468909cbab7c1a87846c392ced5218259c364e4ad3ce413324b1945904da1"
+    },
+    "POL": {
+      "path": "data/POLUSDT_30m.csv.gz",
+      "sha256": "19a61eb1195118d3e320198d92e22009fa917a873a63f56582f558cf20626144",
+      "rows": 2929,
+      "original_csv_sha256": "636ecef7481cc3faf2ad3ca36940146d8a86ec2bd5af34f973cfd1686f9cacdf"
+    },
+    "TAO": {
+      "path": "data/TAOUSDT_30m.csv.gz",
+      "sha256": "ac010244e4eb1889e2de252a1e5123b0af170ec7a1f4ae1e023c72a75f04d097",
+      "rows": 2929,
+      "original_csv_sha256": "71609aeab88117e6370a5669d935a463f2cec175fc42438372e0998e7ece6a88"
+    },
+    "TUT": {
+      "path": "data/TUTUSDT_30m.csv.gz",
+      "sha256": "4c8c7f1c99bc68dfb24a14c82a461d8549e7ffe6379cfd5abfd5b009da65b4ac",
+      "rows": 2929,
+      "original_csv_sha256": "8da9c9775e03813fd89081aa3fe0b407cf39daa234a1674bb3d70e4c12e4d8d0"
+    }
+  },
+  "source_run": "recent_24h_20261006T173000Z",
+  "expected_sha256": {
+    "asset_net_exposure.csv": "eed1c38d70a159c972bde5b33c992f6f24227ce1f894ff76eef6cdd7a033446a",
+    "pair_metrics.csv": "9e2685c0911d8582e6953e105fb1b0b7ad62594d648f52e6f15d2eac3a32002a",
+    "portfolio_equity.csv": "3d6487edeab68b7526efcf8677ea9a3fdf53b864cb351c668c3b98e0cca4cea0",
+    "signals.csv.gz": "4d521f4610095397068f2b3798b9f1b94962bfaab4c952c163e2b7e8015646fe",
+    "summary.json": "27072d872fef8d93db42c0eadf2c5c05344ca7069040742f3fc8c459972e15cb",
+    "trades.csv": "7b9fdd5d17f469610ccde87949ef4368099c28152abdbb99ea009d877e690a7e",
+    "weights.csv": "608133de1491ac3e0347c6b8963781399b31fd97cff76ec393b2dd8a320021a2"
+  }
+}
