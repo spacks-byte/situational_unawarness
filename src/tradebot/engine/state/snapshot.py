@@ -20,11 +20,9 @@ class SnapshotReadError(RuntimeError):
 
 
 def remaining_qty(order: dict[str, Any]) -> float:
-    """Unfilled quantity of a resting order. A row whose FilledQuantity is not strictly between 0 and
-    Quantity is taken as unfilled (the API docs show PENDING rows with FilledQuantity == Quantity)."""
-    qty = _number(order.get("Quantity"))
-    filled = _number(order.get("FilledQuantity"))
-    return qty - filled if 0.0 < filled < qty else qty
+    """Roostoo has no partial executions: reserve the entire pending quantity."""
+    from tradebot.exchange.order_state import pending_quantity
+    return pending_quantity(order)
 
 
 def pending_reserved_usd(orders: list[dict[str, Any]], short_fee: float = SHORT_OPEN_FEE) -> float:

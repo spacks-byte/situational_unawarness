@@ -46,7 +46,7 @@ def test_shortfall_unknown_orders_and_holdings_are_reported_not_fixed(tmp_path):
     report = preflight(settings, sim, lock_path=tmp_path / "lock", now=clock.now())
     assert not report["ready"]
     assert any("MM funding shortfall" in b for b in report["blockers"])
-    assert any("resting orders are in neither" in b for b in report["blockers"])
+    assert any("resting orders are in neither" in b for b in report["warnings"])
     assert [o["pair"] for o in report["unknown_orders"]] == ["BONK/USD"]
     assert report["positions"]["PEPE"]["owner_at_takeover"] == "rxm"
     assert not MUTATING & set(sim.calls)
@@ -101,7 +101,7 @@ def test_explain_shows_restrictions_and_unresolved_intents_from_the_db_only(tmp_
         a.submit(o)
     a.sync()
     out = explain(tmp_path)
-    assert "coin:PEPE" in out["restrictions"]
+    assert "coin:PEPE" in out["issues"]
     assert [x["status"] for x in out["awaiting_venue"]] == ["SUBMITTING"]
     assert any(e["kind"] == "submission_uncertain" for e in out["recent_events"])
     assert explain(tmp_path / "nowhere") == {"state_dir": str(tmp_path / "nowhere"), "initialized": False}

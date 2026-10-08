@@ -130,12 +130,12 @@ def test_failed_balance_read_reports_degraded_then_recovers(tmp_path):
         assert len(sim.history) == sent             # no strategy step on a stale wallet
         status = json.loads((runner.state_dir / "status.json").read_text())
         assert status["result"]["status"] == "DEGRADED"
-        assert "reads" in status["account"]["restrictions"]
+        assert "reads" in status["account"]["issues"]
         assert status["account"]["blocked"] is None  # the ledger itself is intact
         sim.get_balance = original
         assert runner.run_once()["status"] == "OK"
         assert runner.failures == 0
-        assert "reads" not in runner.account.report()["restrictions"]
+        assert "reads" not in runner.account.report()["issues"]
     finally:
         runner.close()
 

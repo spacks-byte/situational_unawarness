@@ -11,8 +11,8 @@ is not instantiated and requires no feature data. Its allocated capital stays in
 its own book; selection never transfers money or liquidates its holdings. Existing
 resting orders remain owned and reconciled even when their strategy is inactive.
 A strategy's feature-source failure does not prevent another strategy from running.
-A reconciliation finding restricts only the strategy, coin, short pair or cash use it
-is traced to (see "Reconciliation and recovery"); it never halts the whole account.
+Reconciliation findings produce durable advisory issues. They never refuse orders
+or halt strategies; order sizing still respects owned resources and venue balances.
 
 ## Shared market data
 
@@ -122,8 +122,8 @@ coordinator blocks rather than silently moving capital.
 Completed orders with at least one confirmed fill are queued in the local
 `portfolio.db` outbox and uploaded to Supabase when `SUPABASE_URL` and
 `SUPABASE_SERVICE_KEY` are present. Rejected orders, canceled orders with zero
-fills, and dry-run orders are not uploaded. Partial fills are uploaded as one
-aggregate transaction for the order.
+fills, and dry-run orders are not uploaded. Roostoo has no partial executions. Only confirmed full executions are uploaded;
+explicit corrections can replace previously uploaded phantom executions.
 
 The supplied table should be altered before enabling this in production so
 strategy ownership is queryable and retries are idempotent:
@@ -201,38 +201,32 @@ or a fill.
 
 Every sync reads pending orders, wallet, short positions and tickers, applies fills,
 and compares the ledger with the venue. Separate venue reads can briefly disagree
-during a fill, so a sync with findings reads once more (fills are cumulative, so
-re-applying is idempotent) before anything is restricted. Findings are graded:
+during a fill, so a sync with findings reads once more before recording an issue.
+`engine/state/issues.py` persists its scope, evidence, occurrence count and resolution.
+Issues are advisory at every age and severity. After two clean observations an issue
+is resolved; its history remains in state/events. Old `restrictions` migrate into
+issues and cannot gate orders after restart.
 
-| Severity | Example | Effect |
-| --- | --- | --- |
-| rounding | commission/proceeds rounding inside tolerance | absorbed: booked to the strategies whose fills caused it and counted in `adjustments` |
-| delayed | lost response, cancel not yet settled, venue read failed | reservation and intent kept, resolved from venue evidence on later syncs; only that coin/pair is restricted meanwhile |
-| material | inventory or cash gap beyond tolerance, unknown order | only the traced scope is restricted; it lifts after `restriction_clear_syncs` (2) clean syncs |
-| unresolved | the same finding 5 syncs in a row | labelled for a person to resolve (`tradebot account explain`) |
+A failed account read reports `DEGRADED` and retries. User pause/kill controls,
+configuration validation, ownership/balance checks, and prevention of duplicate
+uncertain submissions remain independent of reconciliation issues.
 
-Scopes (`engine/state/restrictions.py`) refuse only **new** orders:
-
-| Scope | Refuses |
-| --- | --- |
-| `reads` | every new order until a venue read succeeds (the loop reports `DEGRADED` and backs off) |
-| `coin:<C>` | new orders on coin C, both strategies |
-| `cash:<strategy>` / `cash:account` | new BUY / SHORT_OPEN of that strategy / of both |
-| `short:<PAIR>` | short opens and partial closes on PAIR; a full close stays allowed |
-| `strategy:<S>` | every new order of strategy S |
-
-Sells, short covers and cancels on unrestricted scopes keep working, so open risk can
-always be reduced. Market data, syncing and recovery never stop.
+**Execution evidence.** PENDING reserves the entire accepted quantity. CANCELED and
+REJECTED execute nothing. FILLED requires the complete accepted quantity and a
+positive execution price. FilledQuantity on a canceled order is sometimes a placeholder;
+it is never combined with the limit price to invent a trade. CANCELLED is accepted as
+an input spelling alias of CANCELED. Contradictory evidence is reported without
+changing confirmed accounting or preventing other valid operations.
 
 **Cash tolerance.** `max(cash_tolerance_floor_usd, cash_tolerance_bps x fill notional)`,
 default `max($0.05, 3 bps)`. 3 bps is deliberately below the smallest fee (the 5 bps
 maker fee): a doubled or missing fee is never absorbed as rounding, while sub-cent
 commission rounding always is. The configurable range is 0-30 bps. A gap beyond it
 is traced to the strategy whose fills caused it and keeps that attribution while it
-persists; with no traceable owner it restricts `cash:account`.
+persists; with no traceable owner it reports `cash:account`.
 
-**Lost spot responses.** The intent stays `SUBMITTING` with its reservation and the
-coin is restricted. Each sync searches the venue's order history (paged; completeness
+**Lost spot responses.** The intent stays `SUBMITTING` with its reservation; only a duplicate
+submission of that unresolved operation is deferred. Each sync searches the venue's order history (paged; completeness
 never assumes the page order) for exactly one unowned order with the same pair, side,
 price, quantity and a creation time within `evidence_window_seconds` (30 s). One match
 is adopted. Several matches stay unresolved. No match in a provably complete history
@@ -299,7 +293,7 @@ python -m tradebot --config config/market-making.yaml account explain     # no n
 short positions (attributed to RXM at takeover), resting orders that are in neither
 the RXM journal nor `portfolio.db`, a held account lock, an active standalone RXM
 runner (recent `status.json` in `rxm_state_dir`), and an existing ledger whose
-allocation differs from the config. `explain` shows the active restrictions with
+allocation differs from the config. `explain` shows the active advisory issues with
 reasons, intents still awaiting the venue, rounding adjustments, quote stats and
 the recent recovery events.
 

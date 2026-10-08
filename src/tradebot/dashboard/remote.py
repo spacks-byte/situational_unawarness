@@ -92,8 +92,21 @@ class SupabaseLedger:
 def normalize_order(row):
     response = row.get('exchange_response') or {}
     status = str(row.get('exchange_status') or row.get('status') or 'UNKNOWN').upper()
-    qty = number(row.get('filled_quantity'))
-    price = number(row.get('average_fill_price'))
+    from tradebot.exchange.order_state import canonical_status, normalize_order as execution_of, OrderEvidenceError
+    status = canonical_status(response.get('Status') or status)
+    qty, price = number(row.get('filled_quantity')), number(row.get('average_fill_price'))
+    issue = None
+    if response.get('Status') and row.get('side') in {'BUY', 'SELL'}:
+        try:
+            execution = execution_of(response)
+            qty, price = execution.filled, execution.price
+        except OrderEvidenceError as exc:
+            qty, price, issue = 0., 0., str(exc)
+    elif status != 'FILLED' or str(row.get('status', '')).upper() == 'PARTIALLY_FILLED':
+        # Legacy labels without authoritative full-execution evidence are audit inputs.
+        qty, price = 0., 0.
+    elif not math.isclose(qty, number(row.get('requested_quantity')), rel_tol=1e-9, abs_tol=1e-12):
+        qty, price, issue = 0., 0., 'Legacy execution quantity differs from the full order quantity'
     if not price and qty:
         price = number(row.get('filled_value_usd')) / qty
     submitted = row.get('submitted_at') or row.get('created_at')
@@ -104,7 +117,7 @@ def normalize_order(row):
         state = 'cancelled'
     elif status == 'FILLED':
         state = 'filled'
-    elif status in {'NEW', 'OPEN', 'PENDING', 'SENT', 'PENDING_SEND', 'PARTIALLY_FILLED'}:
+    elif status in {'NEW', 'OPEN', 'PENDING', 'SENT', 'PENDING_SEND'}:
         state = 'pending'
     elif status in {'REJECTED', 'REJECTED_RISK', 'FAILED'}:
         state = 'rejected'
@@ -118,7 +131,7 @@ def normalize_order(row):
                 price=number(row.get('requested_price'), None), filled_quantity=qty,
                 fill_price=price or None, fee=number(row.get('fee_amount')),
                 fee_currency=row.get('fee_currency') or 'USD', time=submitted, fill_time=fill_time,
-                filled=qty > 0, exchange_order_id=row.get('exchange_order_id'))
+                filled=qty > 0, execution_issue=issue, exchange_order_id=row.get('exchange_order_id'))
 
 
 def reconstruct_portfolio(orders, marks):
@@ -126,11 +139,6 @@ def reconstruct_portfolio(orders, marks):
     books = {}
     warnings = []
     for order in sorted(orders, key=lambda o: (utc(o['fill_time']), o['id'])):
-        # Dashboard policy: partial orders do not affect the live position book,
-        # even when their exchange status is cancelled and a fill quantity exists.
-        if any(str(order.get(field) or '').upper() == 'PARTIALLY_FILLED'
-               for field in ('raw_status', 'exchange_status')):
-            continue
         q, p = order['filled_quantity'], order['fill_price']
         if q <= 0:
             continue
@@ -261,7 +269,7 @@ class BinanceData:
 def live_payload(ledger, market):
     orders = [normalize_order(row) for row in ledger.rows()]
     symbols = sorted({o['symbol'] for o in orders})
-    warnings = ['Positions and strategy P&L are reconstructed from recorded fills, excluding PARTIALLY_FILLED orders, not an exchange balance snapshot. P&L excludes cash trading fees; coin-denominated fees adjust holdings. USD entries are treated as USDT at 1:1.']
+    warnings = ['Positions and strategy P&L are reconstructed from recorded fills, using confirmed full executions, not an exchange balance snapshot. P&L excludes cash trading fees; coin-denominated fees adjust holdings. USD entries are treated as USDT at 1:1.']
     try:
         marks = market.marks(symbols) if symbols else {}
         mark_time = getattr(market, 'mark_time', None)
