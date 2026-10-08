@@ -208,7 +208,8 @@ class CapitalAllocation(_Section):
 class MarketMakingConfig(_Section):
     enabled: bool = False
     capital: CapitalAllocation = Field(default_factory=CapitalAllocation)
-    # Allocation and mechanics are the selected, frozen PoC preset.
+    # The live profile supplies its own symbol allocation; this default remains
+    # compatible with the original three-book preset and independent tests.
     allocations: dict[str, float] = Field(default_factory=lambda: {
         "PEPE": 0.85, "BONK": 0.075, "1000CHEEMS": 0.075})
     refresh_seconds: int = Field(default=600, ge=600)
@@ -240,10 +241,12 @@ class MarketMakingConfig(_Section):
     @model_validator(mode="after")
     def validate_allocations(self):
         import math
-        if set(self.allocations) != {"PEPE", "BONK", "1000CHEEMS"} or any(
-            not math.isfinite(v) or v <= 0 for v in self.allocations.values()
-        ) or not math.isclose(sum(self.allocations.values()), 1.0, abs_tol=1e-12):
-            raise ValueError("MM allocations must be positive PEPE/BONK/1000CHEEMS fractions summing to one")
+        if (not self.allocations or any(
+            not isinstance(symbol, str) or not symbol.strip() or
+            not math.isfinite(value) or value <= 0
+            for symbol, value in self.allocations.items()
+        ) or not math.isclose(sum(self.allocations.values()), 1.0, abs_tol=1e-12)):
+            raise ValueError("MM allocations must be positive fractions summing to one")
         return self
 
 

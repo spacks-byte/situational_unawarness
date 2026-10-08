@@ -97,9 +97,9 @@ coordinator's MM/RXM-specific docstring describes only its current implementatio
 
 On first initialization, the allocator assigns **90% of reconciled account equity
 to MM and 10% to RXM**. This is a percentage of the current account value, not a
-fixed $100,000 assumption. Within MM, PEPE receives 85%, BONK 7.5%, and 1000CHEEMS
-7.5%. On a $100,000 account the budgets are therefore $76,500, $6,750, $6,750,
-and $10,000 for RXM.
+fixed $100,000 assumption. The live market-making profile assigns all MM capital to
+PEPE. On a $100,000 account the budgets are therefore $90,000 for PEPE and $10,000
+for RXM.
 
 The total MM allocation must be available as unreserved USD. Existing identifiable
 RXM positions and orders remain RXM-owned. If those holdings leave insufficient

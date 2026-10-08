@@ -9,10 +9,10 @@ Team 87's autonomous trading bot for the [Roostoo](https://app.roostoo.com) mock
 **The strategy is RXM, residual cross-sectional momentum.** Once a day it goes long the coins with the strongest trend after removing their BTC beta and short the weakest, sized by inverse volatility, with a competition lock-in. The full specification and evidence are in [docs/STRATEGY_SPEC.md](docs/STRATEGY_SPEC.md).
 
 An optional [shared-account market-making profile](docs/MARKET_MAKING.md) allocates
-70% of current equity to the long-only `mm-10m-fluctuation` strategy and 30% to RXM.
+90% of current equity to the long-only `mm-10m-fluctuation` strategy and 10% to RXM.
 Each strategy is independently selectable with `--strategies`; neither requires
-the other to run. MM uses its own ledger and fixed ten-minute quotes for PEPE, BONK and
-1000CHEEMS. Run `python -m tradebot --config config/market-making.yaml account preflight`
+the other to run. The live MM profile uses its own ledger and fixed ten-minute quotes for PEPE.
+Run `python -m tradebot --config config/market-making.yaml account preflight`
 (read-only) before a takeover; see the doc for migration, replay and dry-run commands.
 
 One Python package, `tradebot`, contains:

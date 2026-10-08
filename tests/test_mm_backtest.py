@@ -325,10 +325,9 @@ def test_custom_request_normalization_and_live_allocation_policy():
     assert single.mm.active_symbols == ['S']
     with pytest.raises(ValueError, match='allocation keys'):
         BacktestRequest.model_validate(req.model_dump() | {'symbols':['BTC']})
-    with pytest.raises(ValueError, match='positive PEPE'):
-        MarketMakingConfig(allocations={'PEPE':1,'BONK':0,'1000CHEEMS':0})
-    with pytest.raises(ValueError, match='positive PEPE'):
-        MarketMakingConfig(allocations={'BTC':1})
+    assert MarketMakingConfig(allocations={'PEPE': 1}).allocations == {'PEPE': 1}
+    with pytest.raises(ValueError, match='positive fractions'):
+        MarketMakingConfig(allocations={'PEPE': 0, 'BONK': 1})
 
 
 def test_dashboard_and_cli_skip_zero_weight_history_and_rules(tmp_path, capsys):
