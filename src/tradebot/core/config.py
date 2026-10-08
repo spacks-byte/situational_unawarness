@@ -106,7 +106,19 @@ class ExecutionConfig(_Section):
 
 
 class BacktestConfig(_Section):
-    initial_cash: float = 100_000.0       # competition starting portfolio
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    market_slippage_bps: float = Field(default=0, ge=0, lt=10000)
+    penetration_ticks: int = Field(default=0, ge=0)
+    penetration_probability: float = Field(default=1, ge=0, le=1)
+    random_seed: int = Field(default=0, ge=0, le=2**63-1)
+    liquidate_mm: bool = False
+    mm: "BacktestMMConfig" = Field(default_factory=lambda: BacktestMMConfig())
+    archive_cache_dirs: list[str] = Field(default_factory=lambda: ["data/mm-1s", "../shared-backtest/data"])
+    candle_store_dir: str = "var/market"
+    instrument_rules_path: str = "var/backtest/instrument-rules.json"
+    instrument_rules: dict[str, dict] = Field(default_factory=dict)
+    download_missing: bool = True
+    initial_cash: float = Field(default=100_000.0, gt=0)       # competition starting portfolio
     limit_offset_bps: float = 0.0         # buys rest this far below the last close, sells above
     limit_fill: Literal["through", "touch"] = "through"
     rebalance_band: float = 0.01          # skip orders that move a weight by less than this
@@ -202,6 +214,10 @@ class MarketMakingConfig(_Section):
     refresh_seconds: int = Field(default=600, ge=600)
     warmup_seconds: int = Field(default=3600, ge=3600)
     feature_lag_seconds: int = Field(default=1, ge=1)
+    # Midpoint is opt-in so candle-only historical replays remain reproducible.
+    reference_source: Literal["candle_close", "midpoint"] = "candle_close"
+    max_book_age_seconds: float = Field(default=2.0, gt=0, le=60)
+    enforce_one_tick_distance: bool = True
     # Live 1s candles arrive 2-3 s late: decide at last complete second + 1 s if at most this far behind
     max_data_delay_seconds: float = Field(default=5.0, ge=0, le=60)
     lot_fraction: float = Field(default=0.05, gt=0, le=1)
@@ -229,6 +245,48 @@ class MarketMakingConfig(_Section):
         ) or not math.isclose(sum(self.allocations.values()), 1.0, abs_tol=1e-12):
             raise ValueError("MM allocations must be positive PEPE/BONK/1000CHEEMS fractions summing to one")
         return self
+
+
+class BacktestMMConfig(MarketMakingConfig):
+    """Research controls; independent of the live account allocation and cadence."""
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    refresh_seconds: int = Field(default=600, ge=1, le=86400)
+    warmup_seconds: int = Field(default=3600, ge=2, le=86400)
+    feature_lag_seconds: int = Field(default=1, ge=0, le=86399)
+
+    @model_validator(mode="after")
+    def validate_allocations(self):
+        # Override the live preset restriction only for independent backtests.
+        import math
+        import re
+        normalized = {}
+        for symbol, weight in self.allocations.items():
+            coin = symbol.strip().upper().removesuffix('/USDT').removesuffix('/USD')
+            if not re.fullmatch(r'[A-Z0-9]{1,25}', coin) or coin in normalized:
+                raise ValueError('MM allocations require distinct coin tickers, e.g. BTC, ETH, PEPE')
+            normalized[coin] = weight
+        if not 1 <= len(normalized) <= 50 or any(
+            not math.isfinite(v) or v < 0 for v in normalized.values()
+        ) or not math.isclose(sum(normalized.values()), 1.0, rel_tol=0, abs_tol=1e-12):
+            raise ValueError('MM allocations must be nonnegative fractions summing to one, for 1 to 50 symbols')
+        self.allocations = normalized
+        return self
+
+    @property
+    def active_symbols(self) -> list[str]:
+        """Zero-weight symbols are disabled and need neither history nor rules."""
+        return [symbol for symbol, weight in self.allocations.items() if weight > 0]
+
+    @model_validator(mode="after")
+    def validate_history(self):
+        if self.feature_lag_seconds >= self.warmup_seconds:
+            raise ValueError("MM feature lag must be smaller than warm-up")
+        if self.reference_source != "candle_close":
+            raise ValueError("MM midpoint backtests require recorded historical bid/ask observations; use candle_close")
+        return self
+
+
+BacktestConfig.model_rebuild()
 
 
 class Settings(_Section):

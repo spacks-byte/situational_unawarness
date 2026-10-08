@@ -52,8 +52,10 @@ class VenueShapedPort:
         row.setdefault("FilledAverPrice", 0.0)
         row["OrderValue"] = row["Quantity"] * row["Price"]
         row.setdefault("FinishTimestamp", row["CreateTimestamp"])
-        if row["Status"] == "PENDING":
+        if row["Status"] in {"PENDING", "CANCELED"}:
             row["FilledQuantity"] = row["Quantity"]          # documented PENDING shape (= unfilled)
+            row["FilledAverPrice"] = 0.0
+            row["CoinChange"] = row["UnitChange"] = 0.0
             row["CommissionChargeValue"] = 0.0
         elif row["Side"] in {"BUY", "SELL"}:
             filled = float(order.get("FilledQuantity", 0.0))

@@ -61,3 +61,19 @@ def test_one_stale_coin_does_not_hold_back_the_others(tmp_path):
     assert batch.timestamp == clock.now() - timedelta(seconds=2)
     symbols = {q.symbol for q in batch.quotes}
     assert "BONK" not in symbols and symbols
+
+
+def test_midpoint_uses_wall_time_with_delayed_candle_features(tmp_path):
+    bridge, clock = bridge_for(tmp_path, lag=3)
+    clock.advance(2)
+    bridge.config.reference_source = "midpoint"
+    bridge.market_snapshot = lambda: {"quotes": {
+        coin: {"bid": 101., "ask": 101.01, "received_at": clock.now().isoformat()}
+        for coin in bridge.config.allocations}}
+    batch = bridge({})
+    assert batch.quotes
+    assert batch.timestamp == clock.now()
+    assert all(o["reference"] == 101.005 and o["book_age_seconds"] == 0
+               for o in batch.observations.values())
+    assert all(o["feature_input"] == int(clock.now().timestamp()) - 4
+               for o in batch.observations.values())

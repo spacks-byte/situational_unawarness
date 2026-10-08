@@ -25,13 +25,14 @@ import uuid
 
 from tradebot.core import locking
 from tradebot.core.symbols import to_coin, to_pair
-from tradebot.engine.state.restrictions import Restrictions
+from tradebot.engine.state.issues import ReconciliationIssues, evidence_value
+from tradebot.exchange.order_state import normalize_order, OrderEvidenceError, canonical_status, number as order_number
 from tradebot.telemetry.supabase import SupabaseTradeUploader
 from tradebot.engine.state.snapshot import normalize_exchange_snapshot, remaining_qty
 
 MM = "mm-10m-fluctuation"
 ACTIVE = {"READY", "SUBMITTING", "PENDING", "CANCELING"}
-TERMINAL = {"FILLED", "CANCELED", "CANCELLED", "REJECTED"}
+TERMINAL = {"FILLED", "CANCELED", "REJECTED"}
 
 
 class AccountBlocked(RuntimeError):
@@ -63,13 +64,22 @@ class PortfolioStore:
         self.db.execute("CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, timestamp TEXT, kind TEXT, payload TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS completed_orders (intent_id TEXT PRIMARY KEY, order_id TEXT, strategy TEXT, payload TEXT)")
-        self.db.execute("CREATE TABLE IF NOT EXISTS trade_uploads (intent_id TEXT PRIMARY KEY, payload TEXT NOT NULL, uploaded INTEGER NOT NULL DEFAULT 0)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS trade_uploads (intent_id TEXT PRIMARY KEY, payload TEXT NOT NULL, uploaded INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1)")
+        if "revision" not in {r[1] for r in self.db.execute("PRAGMA table_info(trade_uploads)")}:
+            self.db.execute("ALTER TABLE trade_uploads ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
+            self.db.commit()
         self.clock = clock
         self.trade_uploader = trade_uploader
         self.environment = environment
         self.bot_id = bot_id
         row = self.db.execute("SELECT payload FROM portfolio WHERE id=1").fetchone()
         self.state = json.loads(row[0]) if row else None
+        if self.state is not None:
+            ReconciliationIssues(self.state, clock=clock)
+            for order in self.state.get("orders", {}).values():
+                order["status"] = canonical_status(order["status"])
+                if order["status"] == "PARTIALLY_FILLED":
+                    order["status"] = "PENDING"  # re-query legacy records; never infer their execution
         if self.state is not None and self.state.get("version") != 1:
             raise AccountBlocked("unsupported/corrupt portfolio state")
 
@@ -89,13 +99,11 @@ class PortfolioStore:
                         order, environment=self.environment, bot_id=self.bot_id)
                         if self.trade_uploader is not None and self.environment == "live" else None)
                     if transaction is not None:
-                        self.db.execute(
-                            "INSERT OR IGNORE INTO trade_uploads(intent_id, payload) VALUES (?, ?)",
-                            (order["intent_id"], json.dumps(transaction, allow_nan=False)))
+                        self.queue_upload(order["intent_id"], transaction)
                 self.db.execute("INSERT OR REPLACE INTO portfolio VALUES (1, ?)",
                                 (json.dumps(active_state, allow_nan=False),))
                 self.db.execute("INSERT INTO events(timestamp,kind,payload) VALUES(?,?,?)",
-                                (self.clock.now().isoformat(), kind, json.dumps(payload or {}, allow_nan=False)))
+                                (self.clock.now().isoformat(), kind, json.dumps(evidence_value(payload or {}), allow_nan=False)))
         except Exception:
             row = self.db.execute("SELECT payload FROM portfolio WHERE id=1").fetchone()
             self.state = json.loads(row[0]) if row else None
@@ -103,15 +111,22 @@ class PortfolioStore:
         for order in completed:
             del self.state["orders"][order["intent_id"]]
 
+    def queue_upload(self, intent_id, payload):
+        encoded = json.dumps(payload, allow_nan=False, sort_keys=True)
+        self.db.execute("""INSERT INTO trade_uploads(intent_id,payload) VALUES (?,?)
+            ON CONFLICT(intent_id) DO UPDATE SET payload=excluded.payload, uploaded=0,
+            revision=trade_uploads.revision+1 WHERE trade_uploads.payload != excluded.payload""",
+            (intent_id, encoded))
+
     def flush_trade_uploads(self):
         if self.trade_uploader is None:
             return
         rows = self.db.execute(
-            "SELECT intent_id, payload FROM trade_uploads WHERE uploaded=0 ORDER BY intent_id").fetchall()
-        for intent_id, payload in rows:
+            "SELECT intent_id, payload, revision FROM trade_uploads WHERE uploaded=0 ORDER BY intent_id").fetchall()
+        for intent_id, payload, revision in rows:
             self.trade_uploader.upload(json.loads(payload))
             with self.db:
-                self.db.execute("UPDATE trade_uploads SET uploaded=1 WHERE intent_id=?", (intent_id,))
+                self.db.execute("UPDATE trade_uploads SET uploaded=1 WHERE intent_id=? AND revision=?", (intent_id, revision))
 
     def completed(self, strategy, order_id=None):
         query = "SELECT payload FROM completed_orders WHERE strategy=?"
@@ -158,7 +173,7 @@ def total_quantity(wallet, coin):
 
 
 def remaining(order):
-    return max(0.0, order["quantity"] - order.get("filled", 0.0))
+    return order["quantity"] if order["status"] in ACTIVE else 0.0
 
 
 def canonical(value, precision):
@@ -216,12 +231,7 @@ class AccountCoordinator:
         # Temporary legacy import: the current integration attributes existing
         # holdings to RXM. The future ledger must import explicit strategy owners
         # instead of treating RXM as the owner of every remaining position.
-        unknown = [r["OrderID"] for r in self.pending if str(r["OrderID"]) not in self.import_order_ids]
-        if unknown:
-            raise AccountBlocked(f"unknown pending order ownership: {unknown}; import the RXM journal first")
         snapshot = normalize_exchange_snapshot(self.balance, self.shorts, self.tickers, self.pending)
-        if snapshot["unpriced"] or snapshot["lock_unexplained_usd"] > 0.01:
-            raise AccountBlocked("bootstrap has unpriced inventory or unexplained USD locks")
         equity = snapshot["equity_usd"]
         capital = equity * self.config.capital.mm_fraction
         # Include pending spot fees in the headroom: RXM cannot commit MM capital.
@@ -243,30 +253,37 @@ class AccountCoordinator:
                        "cost": 0.0, "fees": 0.0, "realized_pnl": 0.0} for c, w in self.config.allocations.items()},
             "orders": {}, "features": {}, "next_refresh": None, "batch": None,
             "rxm_transferred": False, "run_mode": "dry-run" if self.dry_run else "execute",
-            "restrictions": {}, "adjustments": {"cash_rounding_usd": 0.0, "count": 0},
+            "issues": {}, "adjustments": {"cash_rounding_usd": 0.0, "count": 0},
         }
+        # Keep an explicit opening state for future deterministic accounting repairs.
+        self.state['opening_books'] = deepcopy({k: self.state[k] for k in
+            ('mm', 'rxm_quantity', 'rxm_cost', 'rxm_fees', 'expected_cash_assets')})
         for row in self.pending:
+            if str(row['OrderID']) not in self.import_order_ids:
+                self._issues().flag(f"coin:{to_coin(row['Pair'])}", 'unowned pending order', order_id=str(row['OrderID']))
+                continue
             o = self._record("rxm", to_coin(row["Pair"]), row["Side"], float(row["Quantity"]), float(row["Price"]))
-            filled = float(row.get("FilledQuantity", 0)) if remaining_qty(row) < float(row["Quantity"]) else 0.0
-            o.update(order_id=str(row["OrderID"]), status="PENDING", filled=filled,
-                     value=filled*float(row.get("FilledAverPrice") or row["Price"]),
-                     fee=float(row.get("CommissionChargeValue", 0)), row=row)
+            o.update(order_id=str(row["OrderID"]), status="PENDING", row=evidence_value(row))
+            try:
+                normalize_order(row, o)
+            except OrderEvidenceError as exc:
+                self._issues().flag(f"coin:{o['coin']}", str(exc), order_id=o['order_id'])
             self.orders[o["intent_id"]] = o
         self.store.save("capital_allocated", {"mm": capital, "rxm": equity-capital})
 
     # ------------------------------------------------------------------ synchronization
     def sync(self):
-        """Read the venue, apply fills, reconcile and update scoped restrictions. Never stops trading
-        globally on a reconciliation finding: only the affected strategy, coin, pair or cash use is
-        restricted (engine/state/restrictions.py). Raises only before the ledger exists (startup) or
-        on a configuration error that makes the whole ledger invalid. Returns False if a venue read
-        failed (new orders are refused until a read succeeds; `read_error` says why)."""
+        """Apply confirmed executions and persist advisory reconciliation issues.
+
+        Successful reads with mismatches never gate trading. A failed wallet read
+        returns False so the caller can retry instead of sizing from stale data.
+        """
         findings = self._sync_once()
         if findings is None:                       # a read failed: retried next loop
             return False
         if findings and self.state is not None:
             # A fill landing between two non-atomic venue reads looks like a mismatch: read once more
-            # (fills are cumulative, so re-applying is idempotent) before restricting anything.
+            # (fills are cumulative, so re-applying is idempotent) before recording the discrepancy.
             findings = self._sync_once()
             if findings is None:
                 return False
@@ -274,8 +291,8 @@ class AccountCoordinator:
         self._commit(findings)
         return True
 
-    def _restrictions(self):
-        return Restrictions(self.state, clear_after=self.config.restriction_clear_syncs, clock=self.clock)
+    def _issues(self):
+        return ReconciliationIssues(self.state, clear_after=self.config.restriction_clear_syncs, clock=self.clock)
 
     def refusal(self, strategy, coin, side, *, full_close=False):
         """Why a NEW order may not be sent now (None = allowed)."""
@@ -285,7 +302,14 @@ class AccountCoordinator:
             return "ledger not initialized"
         if self.paused(strategy):
             return "strategy paused"
-        return self._restrictions().refusal(strategy, coin, side, full_close=full_close)
+        if self.read_error:
+            return f"account data unavailable: {self.read_error}"
+        # Only an unresolved submission of this operation is deferred, not the
+        # whole coin/strategy. Reconciliation issues themselves never gate orders.
+        if any(o["coin"] == coin and o["side"] == side and o["status"] == "SUBMITTING"
+               for o in self.active(strategy)):
+            return "awaiting outcome of an existing submission"
+        return None
 
     def _check_config(self):
         if self.state is None:
@@ -302,7 +326,7 @@ class AccountCoordinator:
     def _read_failed(self, exc):
         if self.state is None:
             raise AccountBlocked(f"account read failed during startup: {exc}") from exc
-        r = self._restrictions()
+        r = self._issues()
         r.begin()
         r.flag("reads", f"account read failed: {exc}", "transient")
         self.read_error = str(exc)
@@ -318,9 +342,25 @@ class AccountCoordinator:
             if self.clock.monotonic()-self.rules_read_at >= 3600:
                 self.rules = self.port.get_exchange_info()["TradePairs"]
                 self.rules_read_at = self.clock.monotonic()
-            self.pending = order_rows(self.port.list_open_orders())
+            pending = order_rows(self.port.list_open_orders())
         except Exception as exc:
             return self._read_failed(exc)
+        self.pending = []
+        for index, row in enumerate(pending):
+            try:
+                if not isinstance(row, dict) or row.get('OrderID') is None or not str(row.get('Pair', '')).endswith('/USD'):
+                    raise OrderEvidenceError('pending order lacks identity')
+                status = canonical_status(row.get('Status'))
+                if status in TERMINAL:
+                    continue  # history rows are not outstanding reservations
+                if status != 'PENDING' or row.get('Side') not in {'BUY','SELL','SHORT_OPEN'}:
+                    raise OrderEvidenceError('unsupported pending order state/side')
+                if order_number(row.get('Quantity'), 'Quantity') <= 0 or order_number(row.get('Price'), 'Price') <= 0:
+                    raise OrderEvidenceError('pending order quantity/price must be positive')
+                self.pending.append(row)
+            except OrderEvidenceError as exc:
+                findings.append((f'order:malformed:{index}', str(exc), 'material',
+                                 dict(code='pending_order_evidence', observed=row)))
         if self.state is not None:
             findings += self._process_orders()
         try:
@@ -342,15 +382,15 @@ class AccountCoordinator:
         return findings
 
     def _commit(self, findings):
-        r = self._restrictions()
+        r = self._issues()
         r.begin()
-        for scope, reason, severity in findings:
-            r.flag(scope, reason, severity)
+        for scope, reason, severity, *evidence in findings:
+            r.flag(scope, reason, severity, **(evidence[0] if evidence else {}))
         lifted = r.end()
         self.dirty = False
         self.read_error = None
         self._sync_fills = []        # fills since the last committed sync (incl. cancels and re-reads)
-        payload = {"restrictions": r.report()}
+        payload = {"issues": r.report()}
         if lifted:
             payload["lifted"] = lifted
         self.store.save("reconciled", payload)
@@ -374,7 +414,7 @@ class AccountCoordinator:
             row = lookup.get(o["order_id"])
             if row is None:
                 # Left the resting list: its final state decides fills. Until the venue shows it,
-                # keep the reservation and restrict only this coin (a delayed update, not a halt).
+                # keep this order reservation and record an advisory issue.
                 try:
                     found = order_rows(self.port.query_order(order_id=o["order_id"]))
                 except Exception as exc:
@@ -386,7 +426,9 @@ class AccountCoordinator:
                 row = found[0]
             problem = self._apply(o, row)
             if problem:
-                findings.append((f"coin:{o['coin']}", f"order {o['order_id']}: {problem}", "material"))
+                findings.append((f"coin:{o['coin']}", f"order {o['order_id']}: {problem}", "material",
+                                 dict(code='order_evidence', order_id=o['order_id'], observed=row,
+                                      expected=dict(status='all-or-nothing', quantity=o['quantity']))))
         if self._cancel_retries_due():
             self.dirty = True
         return findings
@@ -441,7 +483,10 @@ class AccountCoordinator:
             if len(candidates) == 1:
                 o["order_id"] = str(candidates[0]["OrderID"])
                 owned.add(o["order_id"])
-                self._apply(o, candidates[0])
+                problem = self._apply(o, candidates[0])
+                if problem:
+                    o['status'] = 'PENDING'
+                    findings.append((f"coin:{o['coin']}", f"order {o['order_id']}: {problem}", "material"))
                 self.store.save("submission_recovered", {"intent": o["intent_id"], "order": o["order_id"]})
             elif not candidates and complete and now - o["submitted_at"] > 2 * window:
                 o["status"] = "REJECTED"         # complete history has no such order: never executed
@@ -453,7 +498,7 @@ class AccountCoordinator:
 
     def _recover_shorts(self):
         """Lost short responses, resolved from the position and resting-order evidence (Roostoo has no
-        client order id). Never resubmits; ambiguous evidence restricts only that pair."""
+        client order id). Never resubmits; ambiguous evidence leaves that request unresolved."""
         unresolved = [o for o in self.active() if o["status"] == "SUBMITTING" and not o.get("order_id")
                       and o["side"] in {"SHORT_OPEN", "SHORT_CLOSE"}]
         findings = []
@@ -468,8 +513,9 @@ class AccountCoordinator:
             resting = [r for r in self.pending if r.get("Side") == "SHORT_OPEN" and r.get("Pair") == pair
                        and str(r.get("OrderID")) not in {x.get("order_id") for x in self.orders.values()}]
             if o["side"] == "SHORT_OPEN" and o.get("limit") and len(resting) == 1 and abs(moved) < 1e-12:
-                o.update(order_id=str(resting[0]["OrderID"]), status="PENDING", row=deepcopy(resting[0]))
+                o.update(order_id=str(resting[0]["OrderID"]), status="PENDING", row=evidence_value(resting[0]))
                 fee = o["collateral"] * self.fees.short_open
+                o['open_fee'] = fee
                 self.state["expected_cash_assets"] -= fee
                 self.state["rxm_fees"] += fee
                 self.store.save("short_recovered", {"intent": o["intent_id"], "order": o["order_id"], "fee_estimated": fee})
@@ -517,18 +563,22 @@ class AccountCoordinator:
             price = float(self.tickers.get("Data", {}).get(to_pair(c), {}).get("LastPrice", 0))
             negligible = math.isfinite(price) and price > 0 and abs(actual-ledger)*price <= 1e-8
             if not math.isclose(actual, ledger, rel_tol=1e-9, abs_tol=1e-7) and not negligible:
-                findings.append((f"coin:{c}", f"inventory mismatch: actual {actual!r}, ledger {ledger!r}", "material"))
+                findings.append((f"coin:{c}", f"inventory mismatch: actual {actual!r}, ledger {ledger!r}", "material",
+                                 dict(code='inventory_mismatch', observed=actual, expected=ledger)))
         actual_shorts = {p["Pair"]: float(p["ShortQty"]) for p in self.shorts["Positions"]}
         unresolved_pairs = {to_pair(o["coin"]) for o in self.active() if o["status"] == "SUBMITTING"
                             and o["side"] in {"SHORT_OPEN", "SHORT_CLOSE"}}
         for pair in set(actual_shorts) | set(self.state["short_quantity"]):
             if pair in unresolved_pairs:
-                continue                                  # already restricted by _recover_shorts
+                continue                                  # already reported by _recover_shorts
             if not math.isclose(actual_shorts.get(pair, 0), self.state["short_quantity"].get(pair, 0), rel_tol=1e-8, abs_tol=1e-7):
                 findings.append((f"short:{pair}", f"short mismatch: actual {actual_shorts.get(pair, 0)!r}, "
                                  f"ledger {self.state['short_quantity'].get(pair, 0)!r}", "material"))
         findings += self._reconcile_cash()
         snapshot = normalize_exchange_snapshot(self.balance, self.shorts, self.tickers, self.pending)
+        if snapshot['unpriced']:
+            findings.append(('prices:account', 'held inventory has no usable market price', 'material',
+                             dict(code='unpriced_inventory', observed=snapshot['unpriced'])))
         if snapshot["lock_unexplained_usd"] > max(self.config.cash_tolerance_floor_usd, 0.01):
             findings.append(("cash:account", f"unexplained USD lock {snapshot['lock_unexplained_usd']:.4f}", "delayed"))
         if self.rxm_free_cash() < -0.01:
@@ -561,7 +611,8 @@ class AccountCoordinator:
         else:
             scope = "cash:account"
         self.state["cash_gap_scope"] = scope
-        return [(scope, f"cash mismatch {diff:+.4f} USD (tolerance {tolerance:.4f}, fills {notional:,.2f})", "material")]
+        return [(scope, f"cash mismatch {diff:+.4f} USD (tolerance {tolerance:.4f}, fills {notional:,.2f})", "material",
+                 dict(code='cash_mismatch', observed=cash, expected=self.state['expected_cash_assets']))]
 
     def _absorb_cash(self, diff, notional):
         """Fee/proceeds rounding inside tolerance: book it to the strategies whose fills caused it."""
@@ -580,7 +631,8 @@ class AccountCoordinator:
             else:
                 self.state["rxm_fees"] -= share
         self.store.save("cash_rounding_adjustment", {"diff": diff, "fill_notional": notional,
-                                                     "owners": sorted({s for s, _, _ in fills})})
+                         "owners": sorted({s for s, _, _ in fills}),
+                         "shares": [dict(strategy=s, coin=c, amount=diff*n/total) for s,c,n in fills]})
 
     def _record(self, strategy, coin, side, quantity, price):
         return dict(intent_id=uuid.uuid4().hex, strategy=strategy, coin=coin, side=side,
@@ -589,40 +641,27 @@ class AccountCoordinator:
 
     def _apply(self, o, row):
         """Apply a venue order row (cumulative fills). Returns a problem description instead of
-        applying when the row cannot be trusted; the caller restricts only that order's coin."""
-        status = str(row.get("Status", "")).upper()
-        if status not in TERMINAL | {"PENDING"}:
-            return f"unsupported order status {status}"
+        applying when the row cannot be trusted; the caller records an advisory issue."""
         try:
-            quantity = float(row["Quantity"])
-            filled = float(row.get("FilledQuantity", 0))
-            price = float(row.get("FilledAverPrice") or row.get("Price", 0))
-        except (KeyError, TypeError, ValueError):
-            return "malformed order row"
-        # Some simulation adapters omit cumulative quantity on a terminal fill.
-        if status == "FILLED" and filled == 0:
-            filled = quantity
-        if status == "PENDING" and filled >= quantity:
-            # The Roostoo docs show resting rows with FilledQuantity == Quantity: read as no new fill
-            # (as the engine snapshot does). A real partial fill always reports 0 < filled < quantity.
-            if not o.get("pending_shape_noted"):
-                o["pending_shape_noted"] = True
-                self.store.save("pending_row_full_filled_quantity", {"order": o.get("order_id")})
-            filled = o["filled"]
-        if filled < o["filled"]-1e-8 or filled > o["quantity"]*(1+1e-9):
-            return "non-monotonic cumulative fill"
-        if not all(math.isfinite(v) for v in (quantity, filled, price)) or quantity <= 0 or filled < 0 or price <= 0:
-            return "invalid numerical fill data"
-        if o["side"] in {"BUY", "SELL"} and float(row.get("CommissionChargeValue", 0) or 0) \
-                and row.get("CommissionCoin", "USD") != "USD":
-            return "non-USD spot commission requires explicit accounting support"
+            execution = normalize_order(row, o)
+        except OrderEvidenceError as exc:
+            return str(exc)
+        status, filled, price = execution.status, execution.filled, execution.price
+        if filled < o["filled"]-1e-8:
+            return "execution regressed; retaining previously recorded accounting for audit/repair"
+        if o['side'] in {'BUY','SELL'} and not filled:
+            if o.get('value') or o.get('fee'):
+                return 'unexecuted order has legacy accounting; audit/repair required'
+            o.update(filled=0., value=0., fee=0., row=evidence_value(row),
+                     status='CANCELING' if status=='PENDING' and o['status']=='CANCELING' else status)
+            return None
         value = filled * price
         delta, value_delta = filled-o["filled"], value-o["value"]
         fee_delta = 0.0
         if o["side"] in {"BUY", "SELL"}:
             rate = self.fees.spot_maker if row.get("Type", "LIMIT") == "LIMIT" else self.fees.spot_taker
             reported = row.get("CommissionChargeValue")
-            fee = float(reported) if reported not in (None, "") else value*rate
+            fee = execution.fee if execution.fee is not None else value*rate
             if reported in (None, "") and delta:
                 o["fee_estimated"] = True        # replaced by the venue's figure when a later row has it
             fee_delta = fee-o["fee"]
@@ -656,14 +695,14 @@ class AccountCoordinator:
             pair = to_pair(o["coin"])
             self.state["short_quantity"][pair] = self.state["short_quantity"].get(pair, 0) + delta
             self.state["short_basis"][pair] = self.state["short_basis"].get(pair, 0) + value_delta
-            if status in {"CANCELED", "CANCELLED", "REJECTED"} and o["status"] not in TERMINAL:
-                refund = (o["quantity"]-filled)*o["price"]*self.fees.short_open
+            if status in {"CANCELED", "REJECTED"} and o["status"] not in TERMINAL:
+                refund = o.get("open_fee", o["quantity"]*o["price"]*self.fees.short_open) if not filled else 0.0
                 self.state["expected_cash_assets"] += refund
                 self.state["rxm_fees"] -= refund
         # A cancel stays pending until the venue shows a terminal state: keep its reservation
         new_status = "CANCELING" if status == "PENDING" and o["status"] == "CANCELING" else status
-        o.update(filled=filled, value=value, status=new_status, row=deepcopy(row))
-        if delta or value_delta:
+        o.update(filled=filled, value=value, status=new_status, row=evidence_value(row))
+        if delta or value_delta or fee_delta:
             self.store.save("fill", {"strategy": o["strategy"], "coin": o["coin"], "side": o["side"],
                                      "quantity": delta, "value": value_delta, "fee_delta": fee_delta,
                                      "execution_timestamp_ms": row.get("FinishTimestamp"), "cumulative_fee": o["fee"],
@@ -685,6 +724,24 @@ class AccountCoordinator:
 
     def mm_free_cash(self):
         return sum(b["cash"] for b in self.state["mm"].values()) - self.reservations(MM)[0]
+
+    def venue_available(self, coin="USD", exclude=None):
+        """Venue Free already excludes its locks; subtract only local unsent intents."""
+        free = float(wallet_of(self.balance).get(coin, {}).get("Free", 0))
+        for order in self.active():
+            if order is exclude:
+                continue
+            if order.get('order_id') is not None:
+                if coin == 'USD' and order['side'] == 'BUY':
+                    # Roostoo locks spot principal but charges the maker fee on fill.
+                    free -= remaining(order)*order['price']*self.fees.spot_maker
+                continue
+            if coin == 'USD' and order['side'] in {'BUY', 'SHORT_OPEN'}:
+                rate = self.fees.spot_maker if order['side'] == 'BUY' else self.fees.short_open
+                free -= order['quantity'] * order['price'] * (1 + rate)
+            elif order['side'] == 'SELL' and order['coin'] == coin:
+                free -= order['quantity']
+        return max(0., free)
 
     def rxm_free_cash(self):
         # The physical exchange does not reserve pending spot fees, our ledgers do.
@@ -735,6 +792,10 @@ class AccountCoordinator:
                 continue
             if q.side == "SELL" and q.quantity > b["quantity"]-held.get(q.symbol, 0)+1e-8:
                 continue
+            if q.side == 'BUY' and q.quantity*q.price*1.0005 > self.venue_available()+1e-8:
+                continue
+            if q.side == 'SELL' and q.quantity > self.venue_available(q.symbol)+1e-8:
+                continue
             if self._crosses(q.symbol, q.side, q.price):
                 self.store.save("self_cross_skipped", q.model_dump())
                 continue
@@ -747,9 +808,14 @@ class AccountCoordinator:
         return prepared
 
     def submit(self, o):
+        if o['status'] != 'READY':
+            # A caller retry must not turn an uncertain submission into REJECTED
+            # (which would discard its reservation and allow a duplicate order).
+            return {'Success': False, 'Pending': o['status'] in ACTIVE,
+                    'ErrMsg': 'intent has already been submitted or resolved'}
         if self.blocked:
             raise AccountBlocked(self.blocked)
-        reason = self._restrictions().refusal(o["strategy"], o["coin"], o["side"]) if self.state else None
+        reason = self.refusal(o["strategy"], o["coin"], o["side"]) if self.state else None
         if reason:
             o["status"] = "REJECTED"
             self.store.save("restricted_skip", {"intent": o["intent_id"], "reason": reason})
@@ -768,6 +834,12 @@ class AccountCoordinator:
             self.store.save("precision_rejected", o)
             return {"Success": False, "ErrMsg": "precision/minimum"}
         o.update(quantity=float(qty), price=float(px))
+        required = o['quantity']*o['price']*(1+self.fees.spot_maker) if o['side']=='BUY' else o['quantity']
+        available = self.venue_available('USD' if o['side']=='BUY' else o['coin'], exclude=o)
+        if required > available + 1e-8:
+            o['status'] = 'REJECTED'
+            self.store.save('insufficient_available_balance', {'intent': o['intent_id']})
+            return {'Success': False, 'ErrMsg': 'insufficient available venue balance'}
         # Fresh venue best prices, not historical Binance prices, protect passivity.
         if o["strategy"] == MM:
             capacity = getattr(self.port, "wait_for_capacity", None)
@@ -807,20 +879,35 @@ class AccountCoordinator:
                 if not isinstance(row, dict) or row.get("OrderID") is None:
                     raise AccountBlocked("submission response missing order identity")
                 o["order_id"] = str(row["OrderID"])
-                self._apply(o, row)
+                problem = self._apply(o, row)
+                if problem:
+                    o['status'] = 'PENDING'
+                    self._issues().flag(f"coin:{o['coin']}", problem, order_id=o['order_id'])
             self.store.save("submission_result", {"intent": o["intent_id"], "response": response})
             # Keep cached wallet conservative between sends; a full read follows batch.
             if response.get("Success"):
                 wallet = wallet_of(self.balance)
                 if o["side"] == "BUY":
                     wallet["USD"]["Free"] -= o["quantity"]*o["price"]
-                    wallet["USD"]["Lock"] = float(wallet["USD"].get("Lock", 0))+o["quantity"]*o["price"]
+                    if o['status'] == 'FILLED':
+                        wallet['USD']['Free'] -= o['fee']
+                        entry = wallet.setdefault(o['coin'], {'Free': 0, 'Lock': 0})
+                        entry['Free'] += o['filled']
+                    else:
+                        wallet["USD"]["Lock"] = float(wallet["USD"].get("Lock", 0))+o["quantity"]*o["price"]
+                else:
+                    entry = wallet.setdefault(o['coin'], {'Free': 0, 'Lock': 0})
+                    entry['Free'] -= o['quantity']
+                    if o['status'] == 'FILLED':
+                        wallet['USD']['Free'] += o['value']-o['fee']
+                    else:
+                        entry['Lock'] = float(entry.get('Lock', 0))+o['quantity']
             return response
         except Exception as exc:
-            # Unknown outcome: keep the intent SUBMITTING (its reservation stays) and restrict only
-            # this coin until history proves it executed or not. Never resubmit blindly.
+            # Unknown outcome: keep the intent SUBMITTING (its reservation stays) until
+            # history proves it executed or not. Other operations continue. Never resubmit blindly.
             reason = f"uncertain submission {o['intent_id']}: {exc}"
-            r = self._restrictions()
+            r = self._issues()
             r.flag(f"coin:{o['coin']}", reason, "delayed")
             self.store.save("submission_uncertain", {"intent": o["intent_id"], "reason": reason})
             raise AccountBlocked(reason) from exc
@@ -854,7 +941,7 @@ class AccountCoordinator:
         if len(rows) == 1:
             problem = self._apply(o, rows[0])
             if problem:
-                self._restrictions().flag(f"coin:{o['coin']}", f"order {order_id}: {problem}", "material")
+                self._issues().flag(f"coin:{o['coin']}", f"order {order_id}: {problem}", "material")
         if o["status"] in ACTIVE:
             o["status"] = "CANCELING"
             self.store.save("cancel_pending", {"order_id": str(order_id)})
@@ -880,7 +967,7 @@ class AccountCoordinator:
 
     def report(self):
         out = {"initial_equity": self.state["initial_equity"], "rxm_capital": self.state["rxm_capital"],
-               "blocked": self.blocked, "restrictions": self._restrictions().report(),
+               "blocked": self.blocked, "issues": self._issues().report(),
                "adjustments": self.state.get("adjustments", {}),
                "quote_stats": self.state.get("quote_stats", {}), "mm": {}}
         for coin, b in self.state["mm"].items():
@@ -963,21 +1050,21 @@ class StrategyAccountPort:
         quantity, price = float(quantity), float(price)
         if not all(math.isfinite(v) and v > 0 for v in (quantity, price)):
             return {"Success": False, "ErrMsg": "invalid size/price"}
-        if side == "BUY" and quantity*price*(1+a.fees.spot_maker) > a.rxm_free_cash()+1e-8:
+        if side == "BUY" and quantity*price*(1+a.fees.spot_maker) > min(a.rxm_free_cash(), a.venue_available())+1e-8:
             return {"Success": False, "ErrMsg": "RXM allocated cash exceeded"}
         _, held = a.reservations("rxm")
-        if side == "SELL" and quantity > a.state["rxm_quantity"].get(coin, 0)-held.get(coin, 0)+1e-8:
+        if side == "SELL" and quantity > min(a.state["rxm_quantity"].get(coin, 0)-held.get(coin, 0), a.venue_available(coin))+1e-8:
             return {"Success": False, "ErrMsg": "RXM owned inventory exceeded"}
         o = a._record("rxm", coin, side, quantity, price)
         a.orders[o["intent_id"]] = o
         return a.submit(o)       # cached wallet is adjusted; the loop's next sync reconciles
 
     def _short_uncertain(self, o, reason):
-        """Unknown outcome of a short request: keep the intent SUBMITTING, restrict only this pair.
+        """Unknown outcome of a short request: keep this intent SUBMITTING until its outcome is known.
         The next syncs resolve it from position/resting-order evidence (AccountCoordinator._recover_shorts)."""
         a = self.account
         pair = to_pair(o["coin"])
-        a._restrictions().flag(f"short:{pair}", f"uncertain {o['side']} {o['intent_id']}: {reason}", "delayed")
+        a._issues().flag(f"short:{pair}", f"uncertain {o['side']} {o['intent_id']}: {reason}", "delayed")
         a.store.save("short_uncertain", {"intent": o["intent_id"], "side": o["side"], "reason": reason})
         return AccountBlocked(f"uncertain {o['side'].lower()} on {pair}: {reason}")
 
@@ -991,7 +1078,7 @@ class StrategyAccountPort:
         reason = a.refusal("rxm", coin, "SHORT_OPEN")
         if reason:
             return {"Success": False, "ErrMsg": reason}
-        if collateral <= 0 or not math.isfinite(collateral) or collateral*(1+a.fees.short_open) > a.rxm_free_cash():
+        if collateral <= 0 or not math.isfinite(collateral) or collateral*(1+a.fees.short_open) > min(a.rxm_free_cash(), a.venue_available()):
             return {"Success": False, "ErrMsg": "RXM short exceeds available cash"}
         if a._crosses(coin, "SHORT_OPEN", float(price) if price is not None else None):
             return {"Success": False, "ErrMsg": "account self-cross"}
@@ -1023,6 +1110,11 @@ class StrategyAccountPort:
                 new_qty = float(r["ShortQty"])
             else:
                 order_id = str(r["ID"])
+                # The venue can round the accepted short size to its amount precision.
+                if 'ShortQty' in r:
+                    o['quantity'] = float(r['ShortQty'])
+                if 'EntryPrice' in r:
+                    o['price'] = float(r['EntryPrice'])
         except (KeyError, TypeError, ValueError) as exc:
             # Accepted but not bookable from the response: resolve from the venue's position evidence
             raise self._short_uncertain(o, f"accepted with an incomplete response ({exc})") from exc
@@ -1033,7 +1125,7 @@ class StrategyAccountPort:
             a.state["short_quantity"][pair] = new_qty
             o["status"] = "FILLED"
         else:
-            o.update(order_id=order_id, status="PENDING")
+            o.update(order_id=order_id, status="PENDING", open_fee=fee)
         # Keep the cached wallet conservative until the next sync: collateral and fee have left Free
         wallet = wallet_of(a.balance)
         wallet["USD"]["Free"] = float(wallet["USD"]["Free"]) - collateral - fee

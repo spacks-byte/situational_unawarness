@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from tradebot.core.clock import SimClock
 from tradebot.data.engine import MarketDataEngine
@@ -155,3 +156,18 @@ def test_default_retention_stays_under_a_gigabyte_worst_case(tmp_path):
     store.maintain()
     size = (tmp_path / "market" / "1s" / "PEPE" / f"{now.date()}.parquet").stat().st_size
     assert size * 3 * 30 < 0.7e9                                  # 3 MM coins x 30 days retention
+
+
+@pytest.mark.parametrize("unit", ["s", "ms", "us", "ns"])
+def test_store_preserves_timestamps_across_index_resolutions(tmp_path, unit):
+    start = datetime(2026, 10, 7, 1, tzinfo=UTC)
+    store, _ = store_at(tmp_path, start)
+    frame = candles(start, 3)
+    frame.index = frame.index.as_unit(unit)
+    store.submit("PEPE", "1s", frame)
+    store.flush()
+    raw = pd.read_csv(tmp_path / "market" / "1s" / "PEPE" / "2026-10-07.csv")
+    assert raw.open_time_ms.tolist() == [int(start.timestamp() * 1000) + i * 1000 for i in range(3)]
+    restored = store.load("PEPE", "1s", start, start + timedelta(seconds=3))
+    assert restored.index.tolist() == frame.index.tolist()
+    assert restored.close.tolist() == frame.close.tolist()

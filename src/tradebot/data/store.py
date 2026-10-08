@@ -126,7 +126,9 @@ class MarketDataStore:
                     path = self._day(interval, coin, day, ".csv")
                     path.parent.mkdir(parents=True, exist_ok=True)
                     out = rows.copy()
-                    out.insert(0, "open_time_ms", (out.index.asi8 // 1_000_000).astype("int64"))
+                    # pandas indexes can use seconds, milliseconds, microseconds
+                    # or nanoseconds; the on-disk contract always uses milliseconds.
+                    out.insert(0, "open_time_ms", out.index.as_unit("ms").asi8)
                     out.to_csv(path, mode="a", header=not path.exists(), index=False)
             self.written += len(frame)
             self.last_error = None

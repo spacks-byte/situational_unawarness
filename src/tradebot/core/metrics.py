@@ -60,7 +60,12 @@ def compute_metrics(equity: pd.Series, interval: str,
     days = (equity.index[-1] - equity.index[0] + bar) / pd.Timedelta(days=1)
 
     total_return = equity.iloc[-1] / start_value - 1
-    ann_return = (1 + total_return) ** (DAYS_PER_YEAR / days) - 1 if days > 0 else np.nan
+    # Very short second-level experiments can exceed the representable annualized
+    # return. Report that ratio as undefined while retaining the observed return.
+    with np.errstate(over='ignore', invalid='ignore'):
+        ann_return = (1 + total_return) ** (DAYS_PER_YEAR / days) - 1 if days > 0 else np.nan
+    if not np.isfinite(ann_return):
+        ann_return = np.nan
     std = returns.std()
     downside = np.sqrt((returns.clip(upper=0) ** 2).mean())
     sharpe = returns.mean() / std * np.sqrt(DAYS_PER_YEAR) if std > 0 else np.nan

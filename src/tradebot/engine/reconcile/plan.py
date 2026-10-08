@@ -100,12 +100,12 @@ def _pending_open_exposure(orders: list[dict[str, Any]] | None) -> tuple[dict[st
             continue
         side = str(order.get("Side", "")).upper()
         qty = float(order.get("Quantity", 0.0) or 0.0)
-        # Only the unfilled part is pending: a partial fill already sits in the wallet / short position
+        # Roostoo pending orders reserve the full accepted quantity (no partial execution).
         remaining = remaining_qty(order)
         notional = remaining * float(order.get("Price", 0.0) or 0.0)
         if side == "SHORT_OPEN":                    # query_order rows carry no Collateral (Roostoo docs)
             collateral = float(order.get("Collateral", 0.0) or 0.0)
-            amount = (collateral * (remaining / qty if qty > 0 else 1.0)) if collateral else notional
+            amount = collateral if collateral else notional
             pending_shorts[symbol] = pending_shorts.get(symbol, 0.0) + amount
         elif side in ("BUY", "SELL"):               # a resting sell already reduces the long
             pending_longs[symbol] = pending_longs.get(symbol, 0.0) + (notional if side == "BUY" else -notional)

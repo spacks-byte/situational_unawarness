@@ -5,7 +5,7 @@ short closes at market, one-bar order lifetime, and cash locked by open orders.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -14,7 +14,7 @@ import pandas as pd
 from tradebot.core.config import BacktestConfig
 from tradebot.strategy.base import Strategy
 
-TRADE_COLUMNS = ["time", "symbol", "side", "order_type", "filled", "quantity", "price", "value", "fee"]
+TRADE_COLUMNS = ["time", "symbol", "side", "order_type", "filled", "quantity", "price", "value", "fee", "quote_price"]
 
 
 @dataclass
@@ -25,6 +25,9 @@ class BacktestResult:
     trades: pd.DataFrame     # one row per order, filled or not (see TRADE_COLUMNS)
     config: BacktestConfig
     interval: str
+    quotes: pd.DataFrame | None = None
+    metadata: dict = field(default_factory=dict)
+    prices: dict = field(default_factory=dict)
 
 
 def _normalize_targets(target: pd.DataFrame) -> pd.DataFrame:
@@ -35,7 +38,7 @@ def _normalize_targets(target: pd.DataFrame) -> pd.DataFrame:
 
 def run_backtest(strategy: Strategy, data: dict[str, pd.DataFrame], interval: str,
                  config: Optional[BacktestConfig] = None,
-                 trade_start: Optional[pd.Timestamp] = None) -> BacktestResult:
+                 trade_start: Optional[pd.Timestamp] = None, *, rules=None, progress=lambda _: None) -> BacktestResult:
     """
     Simulate a portfolio following the strategy's target weights using limit orders.
     Positive weights are spot longs; negative weights are 1x collateralised shorts.
@@ -58,6 +61,11 @@ def run_backtest(strategy: Strategy, data: dict[str, pd.DataFrame], interval: st
     is only used as indicator warm-up), like a competition starting from cash.
     """
     config = config or BacktestConfig()
+    if getattr(strategy, "output_kind", "weights") == "quotes":
+        from tradebot.backtest.quotes import run_quote_backtest
+        if interval != "1s":
+            raise ValueError("MM requires the fixed 1s interval")
+        return run_quote_backtest(strategy, data, config, trade_start=trade_start, rules=rules, progress=progress)
     symbols = list(data)
     n = len(symbols)
 
@@ -105,10 +113,13 @@ def run_backtest(strategy: Strategy, data: dict[str, pd.DataFrame], interval: st
     orders = []
 
     def record(ts, i, side, order_type, filled, q, price, fee):
-        orders.append((ts, symbols[i], side, order_type, filled, q, price, q * price, fee))
+        # Keep the submitted limit separately: gap improvement can change the fill price.
+        quote = (buy_px[i] if side == "BUY" else sell_px[i]) if order_type == "LIMIT" else None
+        orders.append((ts, symbols[i], side, order_type, filled, q, price, q * price, fee, quote))
 
     def close_short(i, q, price, ts, side="COVER"):
         nonlocal cash
+        price *= 1 + config.market_slippage_bps / 10000
         frac = q / sqty[i]
         released = collat[i] * frac + q * (entry[i] - price)
         f = q * price * short_close_fee

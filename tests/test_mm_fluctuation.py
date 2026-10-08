@@ -84,3 +84,43 @@ def test_reductions_capped_and_cash_cannot_anticipate_sales():
     quotes = MMFluctuation().generate(data, now=now, books=books, features={}, rules=rules).quotes
     assert quotes
     assert all(q.side == "SELL" and q.quantity <= 1 for q in quotes)
+
+
+@pytest.mark.parametrize("enforce,expected", [(True, (.00414, .00417)), (False, (.00415, .00416))])
+def test_midpoint_between_ticks_changes_quote_distance(enforce, expected):
+    assert combined_quotes(.004155, 0, 0, 0, .004155, .00001,
+                           enforce_one_tick_distance=enforce) == pytest.approx(expected)
+
+
+def test_latest_midpoint_replaces_price_but_preserves_candle_features():
+    now, data = frames()
+    books, rules = context()
+    config = MarketMakingConfig(reference_source="midpoint")
+    markets = {coin: dict(bid=101., ask=101.01, received_at=now.isoformat()) for coin in books}
+    batch = MMFluctuation(config).generate(data, now=now, books=books, features={}, rules=rules,
+                                          market_quotes=markets)
+    baseline = MMFluctuation().generate(data, now=now, books=books, features={}, rules=rules)
+    assert batch.quotes  # A stale last-trade price below this midpoint must not suppress buys.
+    for coin, observed in batch.observations.items():
+        assert observed["reference"] == pytest.approx(101.005)
+        assert observed["reference_source"] == "midpoint"
+        for field in ("variance", "alpha", "feature_input", "anchor", "lot"):
+            assert observed[field] == baseline.observations[coin][field]
+
+
+@pytest.mark.parametrize("changes", [
+    {"bid": 102.}, {"bid": float("nan")}, {"ask": float("inf")}, {"bid": 0},
+    {"ask": 100.}, {"book_stale": True}, {"received_at": None},
+    {"received_at": "2026-09-21T01:00:02Z"},  # future
+    {"received_at": "2026-09-21T00:59:58Z"},  # too old
+    {"received_at": "2026-09-21T01:00:01"},  # timezone missing
+])
+def test_invalid_midpoint_book_never_falls_back_to_candles(changes):
+    now, data = frames()
+    books, rules = context()
+    quote = dict(bid=100., ask=100.01, received_at=now.isoformat())
+    quote.update(changes)
+    batch = MMFluctuation(MarketMakingConfig(reference_source="midpoint")).generate(
+        data, now=now, books=books, features={}, rules=rules, market_quotes={"PEPE": quote})
+    assert not batch.quotes
+    assert all(o["reason"] == "missing_or_invalid_book" for o in batch.observations.values())

@@ -29,15 +29,16 @@ log = logging.getLogger(__name__)
 
 
 class AccountReadDegraded(RuntimeError):
-    """A venue read failed this loop; the ledger and its restrictions are intact."""
+    """A venue read failed this loop; the ledger and advisory issues are intact."""
 
 
 class QuoteBridge:
     output_kind = "quotes"
 
-    def __init__(self, account, fetch, clock, config):
+    def __init__(self, account, fetch, clock, config, market_snapshot=None):
         self.account, self.fetch, self.clock, self.config = account, fetch, clock, config
         self.strategy = MMFluctuation(config)
+        self.market_snapshot = market_snapshot
 
     def __call__(self, snapshot):
         now = self.clock.now()
@@ -51,7 +52,14 @@ class QuoteBridge:
             start = pd.Timestamp(cursor+1, unit="s", tz="UTC") if cursor is not None else end-pd.Timedelta(
                 seconds=self.config.warmup_seconds + math.ceil(self.config.max_data_delay_seconds) + 1)
             data[coin] = self.fetch(coin, start, end)
-        return self.strategy.generate(data, now=self.decision_time(now, data), books=self.account.state["mm"],
+        feature_time = self.decision_time(now, data)
+        midpoint = self.config.reference_source == "midpoint"
+        # Read the latest book after candle retrieval. Its timestamp is checked against
+        # wall time, not the backdated candle feature time used for a delayed feed.
+        market = self.market_snapshot() if midpoint and self.market_snapshot else {}
+        quote_time = self.clock.now() if midpoint else feature_time
+        return self.strategy.generate(data, now=quote_time, feature_now=feature_time,
+                                      market_quotes=market.get("quotes", {}), books=self.account.state["mm"],
                                       features=self.account.state["features"], rules=self.account.rules)
 
     def decision_time(self, now, data):
@@ -172,7 +180,8 @@ class AccountRunner:
                     self.engines[name] = runtime.engine
                 elif strategy_class.output_kind == "quotes":
                     self.bridges[name] = QuoteBridge(self.account, self.market_data.fetch("1s"),
-                                                      self.clock, settings.market_making)
+                                                      self.clock, settings.market_making,
+                                                      market_snapshot=self.market_data.snapshot)
                     self.engines[name] = Engine(self.account.scoped(name), config=settings.execution.model_copy(
                         update={"dry_run": mode == "dry-run", "live_mode": mode == "live"}), clock=self.clock,
                         quote_executor=self.quotes, state_path=self.state_dir / name / "engine.db",
@@ -271,6 +280,7 @@ class AccountRunner:
                     self.store.flush_trade_uploads()
                 except Exception:
                     log.exception("Supabase trade upload failed; local outbox retained for retry")
+                # Advisory account issues do not change the strategy execution status.
                 status = "PARTIAL" if any(r.get("status") in {"ERROR", "BACKOFF"} for r in strategy_results.values()) else "OK"
                 result = {"status": status, "strategies": strategy_results}
             self.failures, self.last_error = 0, None

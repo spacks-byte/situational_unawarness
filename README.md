@@ -1,5 +1,9 @@
 # Situational Unawareness: Roostoo trading bot
 
+**Agent handoff / next priority:** read [AGENTS.md](AGENTS.md). After the execution
+fix and dashboard server deployment, implement advisory dashboard issue flags.
+The flag UI is explicitly deferred from the current fix.
+
 Team 87's autonomous trading bot for the [Roostoo](https://app.roostoo.com) mock crypto exchange (Roostoo × Susquehanna × AWS Quant Hackathon, live Oct 4–17, 2026). Each team gets $100,000. Bots trade spot longs and 1x shorts, and are judged on return, Sharpe, Sortino and Calmar.
 
 **The strategy is RXM, residual cross-sectional momentum.** Once a day it goes long the coins with the strongest trend after removing their BTC beta and short the weakest, sized by inverse volatility, with a competition lock-in. The full specification and evidence are in [docs/STRATEGY_SPEC.md](docs/STRATEGY_SPEC.md).
@@ -28,6 +32,7 @@ pip install -e ".[dev]"
 cp .env.example .env                                   # add your Roostoo API key and secret
 
 python -m pytest -q                                     # test suite
+python -m tradebot desk --port 8766                      # interactive Supabase dashboard
 python -m tradebot data                                 # download candles (~640 MB per year)
 python -m tradebot backtest --strategy rxm --params k=3,tilt=0.3,buffer=2 --windows --window-days 14
 
@@ -54,7 +59,7 @@ src/tradebot/
   research/   RXM experiments and disciplined tuning
   engine/     live execution engine
   live/       candle bridge, guard, re-pegging, throttle, unattended runner, replay simulation
-  dashboard/  static trading-desk dashboard
+  dashboard/  interactive Supabase research desk + static dashboard
 config/       default.yaml, competition.yaml
 tests/        pytest suite
 docs/         strategy, operations, architecture, review

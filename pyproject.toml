@@ -30,7 +30,7 @@ tradebot = "tradebot.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-tradebot = ["dashboard/template.html"]
+tradebot = ["dashboard/*.html", "dashboard/*.css", "dashboard/*.js"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

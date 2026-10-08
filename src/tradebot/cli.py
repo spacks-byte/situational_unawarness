@@ -121,6 +121,12 @@ def _dashboard_command(args, settings: Settings) -> int:
     return dashboard_main(args.dashboard_args)
 
 
+def _desk_command(args, settings: Settings) -> int:
+    from tradebot.dashboard.server import main as server_main
+
+    return server_main(['--port', str(args.port)], settings=settings)
+
+
 def _account_command(args, settings: Settings) -> int:
     import json
 
@@ -142,6 +148,27 @@ def _account_command(args, settings: Settings) -> int:
         print("[ERROR] Roostoo credentials missing", file=sys.stderr)
         return 2
     port = RoostooExchangePort(client)
+    if args.action == 'repair-fills':
+        import os
+        from pathlib import Path
+        from tradebot.live.fill_repair import audit, apply_manifest
+        from tradebot.dashboard.remote import SupabaseLedger
+        from tradebot.core.locking import AccountLock
+        bot_id = os.getenv('TRADEBOT_BOT_ID', 'tradebot')
+        path = Path(settings.live.state_dir) / 'portfolio.db'
+        ledger = SupabaseLedger()
+        remote = ledger.rows() if ledger.url and ledger.key else []
+        if args.apply:
+            manifest = json.loads(Path(args.apply).read_text())
+            with AccountLock(account_lock_path(settings, port), state_dir=settings.live.state_dir):
+                report = apply_manifest(path, manifest, port, bot_id=bot_id, remote_rows=remote)
+        else:
+            report = audit(path, port, bot_id=bot_id, remote_rows=remote)
+        content = json.dumps(report, indent=2, allow_nan=False)
+        if args.output:
+            Path(args.output).write_text(content+'\n')
+        print(content)
+        return 0 if report.get('applicable') or report.get('applied') or report.get('already_applied') or not report.get('errors') else 1
     report = checks.preflight(settings, port, lock_path=account_lock_path(settings, port))
     print(json.dumps(report, indent=2, default=str) if args.json else checks.render(report))
     return 0 if report["ready"] else 1
@@ -198,12 +225,18 @@ def build_parser() -> argparse.ArgumentParser:
     dash.add_argument("dashboard_args", nargs=argparse.REMAINDER)
     dash.set_defaults(handler=_dashboard_command)
 
-    account = sub.add_parser("account", help="Read-only checks of the shared MM/RXM account (no orders)")
-    account.add_argument("action", choices=["preflight", "explain"],
-                         help="preflight: venue + local state before a takeover; explain: current restrictions from portfolio.db")
+    desk = sub.add_parser('desk', help='Serve the interactive Supabase research dashboard locally')
+    desk.add_argument('--port', type=int, default=8765)
+    desk.set_defaults(handler=_desk_command)
+
+    account = sub.add_parser("account", help="Account checks and reviewed fill recovery (no exchange orders)")
+    account.add_argument("action", choices=["preflight", "explain", "repair-fills"],
+                         help="preflight: venue and local state; explain: advisory issues; repair-fills: dry-run recovery")
     account.add_argument("--state-dir", help="Shared account state dir (default: live.state_dir)")
     account.add_argument("--json", action="store_true", help="preflight: print the full JSON report")
     account.add_argument("--events", type=int, default=20, help="explain: recent journal events to show")
+    account.add_argument('--output', help='repair-fills: save the dry-run manifest/report')
+    account.add_argument('--apply', metavar='MANIFEST', help='repair-fills: explicitly apply a reviewed manifest locally; queues telemetry corrections')
     account.set_defaults(handler=_account_command)
 
     api = sub.add_parser("api", help="Interactive Roostoo API test menu")
