@@ -16,6 +16,8 @@ from tradebot.dashboard.server import Dashboard, make_server
 
 
 def row(id='1', **changes):
+    if 'filled_quantity' in changes and 'requested_quantity' not in changes:
+        changes['requested_quantity'] = changes['filled_quantity']
     return dict(dict(id=id, bot_id='a', environment='live', strategy='rxm', symbol='BTC',
                      side='BUY', order_type='LIMIT', status='FILLED', exchange_status='FILLED',
                      filled=True, requested_quantity=2, requested_price=100, filled_quantity=2,
@@ -48,8 +50,8 @@ def test_filled_orders_contribute_to_long_and_short_positions():
 def test_partial_orders_do_not_create_or_modify_live_positions(status, exchange_status, side):
     partial = normalize_order(row('partial', status=status, exchange_status=exchange_status,
                                   side=side, filled_quantity=1, average_fill_price=120))
-    # Retain the order and its reported fill for the blotter / execution chart.
-    assert partial['filled_quantity'] == 1 and partial['filled']
+    # Retain the legacy order for audit, without drawing an execution.
+    assert partial['filled_quantity'] == 0 and not partial['filled']
     assert reconstruct_positions([partial], {'BTC': 110}) == ([], [])
     opening_side = 'SHORT_OPEN' if side.startswith('SHORT') else 'BUY'
     complete = normalize_order(row(side=opening_side))

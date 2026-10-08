@@ -2,7 +2,7 @@
 
 Each test names the failure it reproduces (P1-P4 are the probes from the PR #7 review) and the
 contract: the coordinator never halts the whole account for it, never resubmits blindly, and
-restricts only the strategy / coin / pair / cash use the evidence points to.
+records advisory issues without refusing otherwise valid orders.
 """
 import pytest
 
@@ -13,8 +13,8 @@ from tradebot.engine.state.portfolio import MM, AccountBlocked, order_rows
 from tradebot.engine.state.snapshot import normalize_exchange_snapshot, remaining_qty
 
 
-def restrictions(a):
-    return a.report()["restrictions"]
+def issues(a):
+    return a.report()["issues"]
 
 
 def wallet_matches_ledger(a, coin="PEPE"):
@@ -27,7 +27,7 @@ def wallet_matches_ledger(a, coin="PEPE"):
 def test_documented_shapes_parse():
     rows = order_rows(fixture("query_order_mixed.json"))
     assert remaining_qty(rows[0]) == 10.0                          # PENDING with Filled == Quantity is unfilled
-    assert remaining_qty(rows[2]) == 8.0                           # a real partial fill
+    assert remaining_qty(rows[2]) == 0.0                           # canceled: no reservation
     assert order_rows(fixture("query_order_none.json")) == []
     snap = normalize_exchange_snapshot(fixture("balance.json"), fixture("short_positions.json"),
                                        fixture("ticker.json"), rows)
@@ -44,12 +44,12 @@ def test_p1_pending_rows_reporting_full_filled_quantity_do_not_block(tmp_path):
     assert a.submit(o)["Success"]
     for _ in range(3):
         a.sync()
-    assert a.blocked is None and restrictions(a) == {}
+    assert a.blocked is None and issues(a) == {}
     assert a.state["mm"]["PEPE"]["quantity"] == 0             # not booked as a fill
     fill_at(venue, clock, 99)
     a.sync()
     assert a.state["mm"]["PEPE"]["quantity"] == pytest.approx(10)
-    assert wallet_matches_ledger(a) and restrictions(a) == {}
+    assert wallet_matches_ledger(a) and issues(a) == {}
 
 
 # ------------------------------------------------------------------ P2: commission rounding
@@ -60,14 +60,14 @@ def test_p2_commission_rounding_within_tolerance_is_absorbed(tmp_path, delta):
     a.submit(o)
     fill_at(venue, clock, 99)
     a.sync()
-    assert restrictions(a) == {}
+    assert issues(a) == {}
     adjustments = a.report()["adjustments"]
     assert adjustments["count"] == (1 if abs(delta) > 1e-9 else 0)
     assert adjustments["cash_rounding_usd"] == pytest.approx(delta, abs=1e-6)
 
 
 @pytest.mark.parametrize("delta", [0.495, -0.495, 2.0])   # a whole 5 bps maker fee doubled / missing, or worse
-def test_p2_cash_gap_beyond_tolerance_restricts_only_the_owner(tmp_path, delta):
+def test_p2_cash_gap_reports_owner_without_refusing_orders(tmp_path, delta):
     # The 3 bps default sits below the smallest fee (5 bps maker): a doubled or missing fee is never
     # absorbed as "rounding", while sub-cent commission rounding always is (test above).
     a, venue, clock, _ = venue_account(tmp_path, commission_delta=delta)
@@ -75,11 +75,11 @@ def test_p2_cash_gap_beyond_tolerance_restricts_only_the_owner(tmp_path, delta):
     a.submit(o)
     fill_at(venue, clock, 99)
     a.sync()
-    assert set(restrictions(a)) == {f"cash:{MM}"}
+    assert set(issues(a)) == {f"cash:{MM}"}
     a.sync(); a.sync()                                         # the gap persists: still traced to MM
-    assert set(restrictions(a)) == {f"cash:{MM}"}
+    assert set(issues(a)) == {f"cash:{MM}"}
     assert a.blocked is None
-    assert a.refusal(MM, "BONK", "BUY") and a.refusal(MM, "PEPE", "SELL") is None
+    assert a.refusal(MM, "BONK", "BUY") is None and a.refusal(MM, "PEPE", "SELL") is None
     assert a.refusal("rxm", "BONK", "BUY") is None             # RXM keeps trading (was: whole account)
     assert a.scoped("rxm").place_order("BONK", "BUY", 1, price=99)["Success"]
 
@@ -90,12 +90,12 @@ def test_p3_lost_market_short_open_is_booked_from_the_position(tmp_path):
     venue.lose.add("open_short")
     with pytest.raises(AccountBlocked, match="uncertain short_open"):
         a.scoped("rxm").open_short("BONK", 500)
-    assert "short:BONK/USD" in restrictions(a)
+    assert "short:BONK/USD" in issues(a)
     assert a.refusal("rxm", "PEPE", "BUY") is None
     a.sync()
     assert a.state["short_quantity"]["BONK/USD"] == pytest.approx(5.0)
     a.sync(); a.sync()
-    assert restrictions(a) == {} and venue.calls["open_short"] == 1  # never re-sent
+    assert issues(a) == {} and venue.calls["open_short"] == 1  # never re-sent
 
 
 def test_p3_short_open_that_never_reached_the_venue_is_rejected_after_the_window(tmp_path):
@@ -104,11 +104,11 @@ def test_p3_short_open_that_never_reached_the_venue_is_rejected_after_the_window
     with pytest.raises(AccountBlocked):
         a.scoped("rxm").open_short("BONK", 500)
     a.sync()
-    assert "short:BONK/USD" in restrictions(a)
+    assert "short:BONK/USD" in issues(a)
     assert a.refusal("rxm", "BONK", "SHORT_OPEN")
     clock.advance(2 * a.config.evidence_window_seconds + 1)
     a.sync(); a.sync(); a.sync()
-    assert restrictions(a) == {} and not a.active("rxm")
+    assert issues(a) == {} and not a.active("rxm")
     assert not venue.sim.shorts
 
 
@@ -120,11 +120,11 @@ def test_p3_lost_short_close_is_booked_and_full_close_stays_allowed(tmp_path):
     venue.lose.add("close_short")
     with pytest.raises(AccountBlocked):
         rxm.close_short("BONK", close_qty=4)
-    assert a.refusal("rxm", "BONK", "SHORT_CLOSE", full_close=True) is None   # risk can still be cut
+    assert a.refusal("rxm", "BONK", "SHORT_CLOSE", full_close=True)  # do not duplicate an uncertain close
     a.sync()
     assert a.state["short_quantity"]["BONK/USD"] == pytest.approx(6.0)
     a.sync(); a.sync()
-    assert restrictions(a) == {}
+    assert issues(a) == {}
 
 
 # ------------------------------------------------------------------ P4: delayed cancel settlement
@@ -137,9 +137,9 @@ def test_p4_delayed_cancel_keeps_the_reservation_and_defers_the_replacement(tmp_
     assert result.get("Pending") and o["status"] == "CANCELING"
     assert prepare(a, clock) == []                             # no duplicate quote on PEPE BUY
     a.sync()
-    assert o["status"] == "CANCELING" and restrictions(a) == {}
+    assert o["status"] == "CANCELING" and issues(a) == {}
     a.sync(); a.sync()
-    assert not a.active(MM) and restrictions(a) == {}
+    assert not a.active(MM) and issues(a) == {}
     assert a.state["mm"]["PEPE"]["cash"] == pytest.approx(a.state["mm"]["PEPE"]["capital"])
 
 
@@ -168,7 +168,7 @@ def test_restart_mid_submit_recovers_the_order_from_history(tmp_path):
     adopted = [x for x in b.active(MM) if x["intent_id"] == o["intent_id"]]
     assert adopted and adopted[0]["order_id"] == str(venue.sim.history[-1]["OrderID"])
     b.sync()
-    assert restrictions(b) == {} and venue.calls["place_order"] == 1
+    assert issues(b) == {} and venue.calls["place_order"] == 1
 
 
 def test_restart_mid_cancel_confirms_the_cancel(tmp_path):
@@ -181,7 +181,7 @@ def test_restart_mid_cancel_confirms_the_cancel(tmp_path):
     assert [x["status"] for x in b.active(MM)] == ["CANCELING"]
     clock.advance(b.config.cancel_retry_seconds)
     assert QuoteExecutor(b, clock).cancel_owned() == set()
-    assert not venue.sim.orders and restrictions(b) == {}
+    assert not venue.sim.orders and issues(b) == {}
 
 
 def test_history_paging_order_does_not_declare_a_lost_order_unexecuted(tmp_path):
@@ -199,7 +199,7 @@ def test_history_paging_order_does_not_declare_a_lost_order_unexecuted(tmp_path)
 
 
 # ------------------------------------------------------------------ independent strategies
-def test_restrictions_stay_with_their_strategy(tmp_path):
+def test_unresolved_short_does_not_prevent_other_operations(tmp_path):
     a, venue, clock, _ = venue_account(tmp_path)
     venue.fail.add("open_short")
     with pytest.raises(AccountBlocked):

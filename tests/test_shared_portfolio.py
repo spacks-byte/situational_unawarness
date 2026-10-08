@@ -109,39 +109,19 @@ def test_cancel_refund_and_realized_pnl(tmp_path):
     assert a.report()["mm"]["PEPE"]["net_pnl"] == pytest.approx(19)
 
 
-def test_partial_fills_cancel_race_and_duplicate_history(tmp_path):
+def test_full_fill_wins_cancel_race_and_duplicate_history(tmp_path):
     a, sim, clock = setup_account(tmp_path)
     o, = prepare(a, clock)
     a.submit(o)
-    # A partial venue fill preserves the remaining principal reservation.
-    row = sim.orders[0]
-    row.update(FilledQuantity=4, FilledAverPrice=99)
-    sim.coins["PEPE"] = 4
-    sim.free_usd -= 4*99*.0005
-    original_balance = sim.get_balance
-    def balance():
-        b = original_balance()
-        b["SpotWallet"]["USD"]["Lock"] = 6*99
-        return b
-    sim.get_balance = balance
-    a.sync()
-    a.sync()
-    assert a.owner("PEPE")["quantity"] == 4
-    assert a.owner("PEPE")["fees"] == pytest.approx(.198)
-    assert a.reservations(MM)[0] == pytest.approx(594.297)
-    # Another fill wins the cancellation race; final row must be applied first.
     def cancel(order_id=None, pair=None):
-        row.update(FilledQuantity=7, Status="CANCELED")
-        sim.coins["PEPE"] = 7
-        sim.free_usd += 3*99 - 3*99*.0005
-        sim.orders.clear()
+        fill_next(a, sim, clock, 98)
         return {"Success": True}
     sim.cancel_order = cancel
-    sim.get_balance = original_balance
-    a.cancel(MM, o["order_id"])
+    a.cancel(MM, o['order_id'])
     a.sync()
-    assert a.owner("PEPE")["quantity"] == 7
-    assert a.owner("PEPE")["cash"] == pytest.approx(76500-7*99*1.0005)
+    a.sync()
+    assert a.owner('PEPE')['quantity'] == 10
+    assert a.owner('PEPE')['cash'] == pytest.approx(76500-990.495)
     assert a.reservations(MM)[0] == 0
 
 
@@ -166,26 +146,25 @@ def test_uncertain_submit_recovers_unique_order_and_never_duplicates(tmp_path):
     assert len(sim.history) == 1
 
 
-def test_unexplained_cash_and_unknown_order_restrict_only_their_scope(tmp_path):
+def test_unexplained_cash_and_unknown_order_are_advisory(tmp_path):
     a, sim, clock = setup_account(tmp_path)
     sim.free_usd += 100                     # untraceable: no fills this sync
     a.sync()
     assert a.blocked is None
-    assert "cash mismatch" in a.report()["restrictions"]["cash:account"]["reason"]
-    assert prepare(a, clock) == []          # cash-spending quotes refused ...
-    assert a.refusal(MM, "PEPE", "SELL") is None and a.refusal("rxm", "BONK", "SELL") is None  # ... risk reduction not
-    assert not a.submit(a._record(MM, "PEPE", "BUY", 1, 99))["Success"]
-    assert not sim.history
+    assert "cash mismatch" in a.report()["issues"]["cash:account"]["reason"]
+    order, = prepare(a, clock)
+    assert a.submit(order)['Success']
+    assert a.refusal(MM, 'BONK', 'BUY') is None
     sim.free_usd -= 100
     a.sync()
-    assert "cash:account" in a.report()["restrictions"]   # lifts only after consecutive clean syncs
+    assert "cash:account" in a.report()["issues"]   # lifts only after consecutive clean syncs
     a.sync()
-    assert a.report()["restrictions"] == {}
+    assert a.report()["issues"] == {}
     sim.place_order("PEPE", "BUY", 1, price=99)          # an order this coordinator did not send
     a.sync()
-    restrictions = a.report()["restrictions"]
+    restrictions = a.report()["issues"]
     assert set(restrictions) == {"coin:PEPE"} and "unowned" in restrictions["coin:PEPE"]["reason"]
-    assert a.refusal("rxm", "PEPE", "BUY") and a.refusal(MM, "BONK", "BUY") is None
+    assert a.refusal("rxm", "PEPE", "BUY") is None and a.refusal(MM, "BONK", "BUY") is None
     assert "cancel_order" not in sim.calls                # never adopted or cancelled automatically
 
 
@@ -194,7 +173,7 @@ def test_cash_roundoff_within_tolerance_is_absorbed_and_recorded(tmp_path):
     expected = a.state["expected_cash_assets"]
     sim.free_usd += 0.03                    # below the 0.05 USD floor
     a.sync()
-    assert a.report()["restrictions"] == {}
+    assert a.report()["issues"] == {}
     assert a.state["expected_cash_assets"] == pytest.approx(expected + 0.03)
     assert a.report()["adjustments"]["count"] == 1
     assert a.report()["adjustments"]["cash_rounding_usd"] == pytest.approx(0.03)
@@ -259,7 +238,7 @@ def test_deadline_and_pause_are_rechecked_after_ticker_wait(tmp_path):
     assert not sim.history
 
 
-def test_uncertain_submission_restricts_its_coin_until_history_proves_no_execution(tmp_path):
+def test_uncertain_submission_tracks_outcome_until_history_proves_no_execution(tmp_path):
     a, sim, clock = setup_account(tmp_path)
     place = sim.place_order
     def timeout(*args, **kwargs):
@@ -273,14 +252,14 @@ def test_uncertain_submission_restricts_its_coin_until_history_proves_no_executi
         a.sync()
         clock.advance(10)
     assert a.blocked is None and len(a.active(MM)) == 1 and not sim.history
-    assert "coin:PEPE" in a.report()["restrictions"]
+    assert "coin:PEPE" in a.report()["issues"]
     assert a.refusal(MM, "BONK", "BUY") is None
     assert prepare(a, clock) == []          # never resubmitted while the outcome is unknown
     clock.advance(60)
     a.sync()                                # complete history, no such order: never executed
     assert not a.active(MM) and o["status"] == "REJECTED"
     a.sync()
-    assert a.report()["restrictions"] == {}
+    assert a.report()["issues"] == {}
     assert not sim.history
 
 
@@ -298,7 +277,7 @@ def test_lost_spot_response_is_adopted_from_history_without_resubmitting(tmp_pat
     assert o["order_id"] and o["status"] == "PENDING"
     assert len(sim.history) == 1
     a.sync()
-    assert a.report()["restrictions"] == {}
+    assert a.report()["issues"] == {}
 
 
 def test_bootstrap_insufficient_unreserved_cash_does_not_liquidate(tmp_path):
@@ -409,7 +388,7 @@ def test_near_flat_large_lots_reconcile_without_rewriting_cash_or_positions(tmp_
     # A real coin discrepancy must still be found; this is not a blanket waiver for
     # assets with small unit prices, and other strategy holdings remain separate.
     a.state["rxm_quantity"]["PEPE"] = 1.
-    assert [(scope, "inventory mismatch" in reason) for scope, reason, _ in a._reconcile()] == [("coin:PEPE", True)]
+    assert [(scope, "inventory mismatch" in reason) for scope, reason, *_ in a._reconcile()] == [("coin:PEPE", True)]
 
 
 @pytest.mark.parametrize("price", [0., -1., float("nan"), 100_000.])
@@ -417,4 +396,4 @@ def test_roundoff_allowance_needs_valid_price_and_negligible_value(tmp_path, pri
     a, sim, clock = setup_account(tmp_path)
     a.owner("PEPE")["quantity"] = 9.5367431640625e-7
     a.tickers["Data"]["PEPE/USD"]["LastPrice"] = price
-    assert [(scope, "inventory mismatch" in reason) for scope, reason, _ in a._reconcile()] == [("coin:PEPE", True)]
+    assert [(scope, "inventory mismatch" in reason) for scope, reason, *_ in a._reconcile()] == [("coin:PEPE", True)]

@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 
 class AccountReadDegraded(RuntimeError):
-    """A venue read failed this loop; the ledger and its restrictions are intact."""
+    """A venue read failed this loop; the ledger and advisory issues are intact."""
 
 
 class QuoteBridge:
@@ -280,6 +280,7 @@ class AccountRunner:
                     self.store.flush_trade_uploads()
                 except Exception:
                     log.exception("Supabase trade upload failed; local outbox retained for retry")
+                # Advisory account issues do not change the strategy execution status.
                 status = "PARTIAL" if any(r.get("status") in {"ERROR", "BACKOFF"} for r in strategy_results.values()) else "OK"
                 result = {"status": status, "strategies": strategy_results}
             self.failures, self.last_error = 0, None

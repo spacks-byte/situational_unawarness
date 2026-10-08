@@ -205,7 +205,7 @@ def perform_backtest(request, market, progress=lambda _: None, settings=None):
 def live_executions(orders, market, strategy, symbol, bot=None):
     start, end, selected = execution_window(orders, strategy, bot)
     fills = [dict(o, time=o['fill_time'], price=o['fill_price'], quantity=o['filled_quantity'])
-             for o in selected if o['symbol'] == symbol and o['filled_quantity'] > 0 and o['fill_price']]
+             for o in selected if o['symbol'] == symbol and o['filled'] and o['filled_quantity'] > 0 and o['fill_price']]
     # TODO: replace inferred first/last transaction bounds with a strategy_runs table
     # (strategy, bot_id, activated_at, deactivated_at, heartbeat_at), including restarts.
     # Recorded transactions cannot establish idle periods or whether a strategy is still active.
@@ -227,4 +227,4 @@ def live_executions(orders, market, strategy, symbol, bot=None):
     return dict(strategy=strategy, symbol=symbol, start=start.isoformat(), end=end.isoformat(),
                 prices=price_points, trades=fills, warning=warning,
                 window_basis='First submitted order to last recorded resolution; inferred activity, not deployment timestamps.',
-                timestamp_basis='Markers use the recorded final fill time; partial fills are aggregated per order.')
+                timestamp_basis='Markers use the recorded final fill time; Roostoo executions are all-or-nothing.')

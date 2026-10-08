@@ -57,14 +57,10 @@ def test_lock_nobody_explains_stays_cash_and_is_reported():
 
 
 # ---------------------------------------------------------------------------- partial fills
-def test_a_partial_fill_counts_only_the_unfilled_rest_as_pending():
-    part = dict(BUY, FilledQuantity=4_000.0)                    # 4k already in the wallet
-    longs, _ = pending_open_exposure([part])
-    assert longs["SUI"] == pytest.approx(6_000.0)
-    quirk = dict(BUY, FilledQuantity=10_000.0)                  # API doc rows: PENDING with Filled == Quantity
-    assert pending_open_exposure([quirk])[0]["SUI"] == pytest.approx(10_000.0)
-    short_part = dict(SHORT, FilledQuantity=250.0, Collateral=7_000.0)
-    assert pending_open_exposure([short_part])[1]["ZEN"] == pytest.approx(5_250.0)
+def test_pending_quantity_is_never_treated_as_a_partial_execution():
+    for filled in [0, 4000, 10000]:
+        assert pending_open_exposure([dict(BUY, FilledQuantity=filled)])[0]['SUI'] == 10000
+    assert pending_open_exposure([dict(SHORT, FilledQuantity=250, Collateral=7000)])[1]['ZEN'] == 7000
 
 
 # ---------------------------------------------------------------------------- partial reads

@@ -1,3 +1,11 @@
+<!-- Agent handoff: see root AGENTS.md before starting the next feature. -->
+
+**TODO — highest-priority follow-up after the execution/reconciliation fix and dashboard
+server deployment:** show persisted account reconciliation issues as dashboard flags,
+including affected strategy/symbol/order, evidence, recurrence and resolution. They
+must never gate trading. Do not implement badges, notifications or issue-management
+controls in the current execution fix. Backend signals already belong to that fix.
+
 # Trading dashboard and Guard
 
 ## Interactive research desk (Supabase)
@@ -76,32 +84,30 @@ and aggregates accounts only after calculating each account's cost basis
 separately. Realized P&L uses weighted-average entry cost on closed quantities,
 including fully closed positions; unrealized P&L uses current Binance USDT marks.
 These values cover all available recorded history and exclude cash trading fees;
-coin-denominated fees adjust holdings and cost basis. `PARTIALLY_FILLED` orders
-are excluded from both components. Missing entry history makes the affected
+coin-denominated fees adjust holdings and cost basis. Only confirmed full executions
+affect either component. Missing entry history makes the affected
 strategy totals unavailable; missing marks affect unrealized and total P&L while
 retaining known realized P&L. Order-status and search filters affect only the
 blotter, not strategy totals.
 
 Positions are reconstructed separately for each account, strategy, symbol and
 long/short side using cumulative filled quantities and weighted-average entry
-prices. Orders with `PARTIALLY_FILLED` in either the ledger status or exchange
-status are excluded from position quantities, entry prices and P&L, including
-orders whose exchange status is cancelled. This applies to both opening and
-closing orders. They remain visible in the blotter and execution charts.
+prices. Raw Roostoo responses take precedence over legacy execution labels. Canceled
+orders have zero executed quantity. Legacy partial labels without authoritative full-fill
+evidence remain audit records and do not create positions or execution markers.
 USD trade entries are treated as USDT at 1:1; displayed position P&L is
 **unrealized and before fees**, marked to Binance spot USDT. Base-currency fees
 reduce long holdings when recorded. Missing marks and insufficient position
 history show **—**, not a zero price or invented cost basis. This is a ledger
 view, not an authoritative exchange balance: transfers and trades missing from
-Supabase cannot be reconstructed. Cancelled orders retain their executed
-quantities, and the UI shows both cancellation and the recorded fills.
+Supabase cannot be reconstructed. Canceled orders remain in the blotter with zero executed quantity.
 
 Enable **Show live executions** to show actual fills beside the simulated
 executions. Choose a live strategy and symbol; the account filter also applies.
 The live chart is strictly bounded by the first submitted transaction and last
 recorded resolution for that strategy/account. The chart explicitly labels this
 as the **recorded activity window**. Live markers use final fill timestamps and
-cumulative order fills; individual partial-fill timestamps are unavailable.
+full order executions; Roostoo has no partial executions.
 
 **TODO — strategy lifecycle:** add a `strategy_runs` table with strategy, bot ID,
 activation, deactivation and heartbeat timestamps, including restart intervals.
@@ -111,8 +117,7 @@ cannot prove inactivity, and the final transaction cannot prove the strategy
 has stopped. Until lifecycle data exists, retain the recorded-window label.
 
 **TODO — account reconciliation:** add periodic exchange position snapshots and
-per-fill events to distinguish incomplete trade history, exact partial-fill
-times and account inventory that predates a strategy's recorded orders.
+execution events to distinguish incomplete trade history and account inventory that predates a strategy's recorded orders.
 
 ### Implementation and verification
 

@@ -127,9 +127,9 @@ def preflight(settings: Any, port: Any, *, lock_path: Path, now: datetime | None
     report["shorts"] = {p["Pair"]: {"quantity": float(p["ShortQty"]), "entry_price": float(p.get("EntryPrice", 0))}
                         for p in (shorts or {}).get("Positions", []) if float(p.get("ShortQty", 0)) > 0}
     if snapshot["unpriced"]:
-        blockers.append(f"held coins without a Roostoo price: {sorted(snapshot['unpriced'])}")
+        warnings.append(f"held coins without a Roostoo price: {sorted(snapshot['unpriced'])}")
     if snapshot["lock_unexplained_usd"] > 0.01:
-        blockers.append(f"USD Lock not explained by resting orders or short collateral: "
+        warnings.append(f"USD Lock not explained by resting orders or short collateral: "
                         f"${snapshot['lock_unexplained_usd']:.2f}")
 
     stored = stored_account(settings.live.state_dir)
@@ -143,7 +143,7 @@ def preflight(settings: Any, port: Any, *, lock_path: Path, now: datetime | None
     report["pending_orders"] = len(pending)
     report["unknown_orders"] = unknown
     if unknown:
-        blockers.append(f"{len(unknown)} resting orders are in neither the RXM journal nor portfolio.db: "
+        warnings.append(f"{len(unknown)} resting orders are in neither the RXM journal nor portfolio.db: "
                         "the coordinator never adopts or cancels them; resolve them by hand first")
 
     equity = snapshot["equity_usd"]
@@ -163,13 +163,13 @@ def preflight(settings: Any, port: Any, *, lock_path: Path, now: datetime | None
                             "Nothing is sold automatically: free cash by hand (or lower mm_fraction) first")
     else:
         report["existing_ledger"] = {"run_mode": state.get("run_mode"), "capital_fraction": state.get("capital_fraction"),
-                                     "rxm_capital": state.get("rxm_capital"), "restrictions": state.get("restrictions", {}),
+                                     "rxm_capital": state.get("rxm_capital"), "issues": state.get("issues", state.get("restrictions", {})),
                                      "active_orders": len(state.get("orders", {}))}
         if state.get("capital_fraction") != mm.capital.mm_fraction:
             blockers.append(f"portfolio.db was allocated at mm_fraction={state.get('capital_fraction')}, "
                             f"config says {mm.capital.mm_fraction}: an explicit migration is required")
         if state.get("restrictions"):
-            warnings.append(f"existing restrictions will persist: {sorted(state['restrictions'])}")
+            warnings.append(f"legacy restrictions will migrate to advisory issues: {sorted(state['restrictions'])}")
     if report["shorts"]:
         warnings.append(f"open shorts {sorted(report['shorts'])} are attributed to RXM at takeover")
     if positions:
@@ -193,7 +193,7 @@ def explain(state_dir: str | Path, events: int = 20) -> dict[str, Any]:
                   for o in state.get("orders", {}).values() if o.get("status") in {"SUBMITTING", "CANCELING"}]
     return {
         "state_dir": str(state_dir), "initialized": True, "run_mode": state.get("run_mode"),
-        "restrictions": state.get("restrictions", {}),
+        "issues": state.get("issues", state.get("restrictions", {})),
         "adjustments": state.get("adjustments", {}),
         "quote_stats": state.get("quote_stats", {}),
         "awaiting_venue": unresolved,

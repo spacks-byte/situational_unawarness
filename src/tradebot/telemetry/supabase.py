@@ -8,6 +8,7 @@ from typing import Any
 
 import requests
 from dotenv import find_dotenv, load_dotenv
+from tradebot.exchange.order_state import normalize_order, canonical_status
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ class SupabaseTradeUploader:
             raise RuntimeError(f"Supabase trade upload failed ({response.status_code}): {response.text[:500]}")
 
     @staticmethod
-    def transaction(order: dict[str, Any], *, environment: str, bot_id: str) -> dict[str, Any] | None:
+    def transaction(order: dict[str, Any], *, environment: str, bot_id: str, correction=False) -> dict[str, Any] | None:
         row = order.get("row") or {}
         side = str(order.get("side", "UNKNOWN")).upper()
         operation = {
@@ -47,12 +48,19 @@ class SupabaseTradeUploader:
             "SHORT_OPEN": "open_short",
             "SHORT_CLOSE": "close_short",
         }.get(side, "close_long")
-        status = str(order.get("status", "REJECTED")).upper()
-        filled_quantity = float(order.get("filled", 0.0) or 0.0)
-        if filled_quantity <= 0:
+        status = canonical_status(order.get("status", "REJECTED"))
+        filled_quantity, average_price = 0.0, 0.0
+        if side in {'BUY', 'SELL'} and row:
+            execution = normalize_order(row, order)
+            status = execution.status
+            filled_quantity, average_price = execution.filled, execution.price
+        elif status == 'FILLED':
+            # Short endpoints have their own position-shaped accounting contract.
+            filled_quantity = float(order.get('filled') or 0)
+            average_price = float(order.get('value') or 0) / filled_quantity if filled_quantity else 0
+        if filled_quantity <= 0 and not correction:
             return None
-        average_price = float(row.get("FilledAverPrice") or order.get("price") or 0.0)
-        filled_value = filled_quantity * average_price if filled_quantity else None
+        filled_value = filled_quantity * average_price
         submitted = order.get("submitted_at")
         submitted_at = (datetime.fromtimestamp(float(submitted), tz=timezone.utc).isoformat()
                         if submitted else None)
@@ -68,15 +76,15 @@ class SupabaseTradeUploader:
             "side": side,
             "order_type": str(row.get("Type") or "LIMIT").upper(),
             "strategy": str(order["strategy"]),
-            "status": "FILLED" if status == "FILLED" else "PARTIALLY_FILLED",
+            "status": status,
             "requested_value_usd": float(order.get("quantity", 0.0)) * float(order.get("price", 0.0)),
             "requested_quantity": float(order.get("quantity", 0.0)),
             "requested_price": float(order.get("price", 0.0)),
             "filled": filled_quantity > 0,
-            "filled_quantity": filled_quantity or None,
+            "filled_quantity": filled_quantity,
             "average_fill_price": average_price if filled_quantity else None,
             "filled_value_usd": filled_value,
-            "fee_amount": max(0.0, float(order.get("fee", 0.0) or 0.0)),
+            "fee_amount": float(order.get("fee", 0.0) or 0.0) if filled_quantity else 0.0,
             "fee_currency": "USD",
             "exchange_order_id": str(order["order_id"]) if order.get("order_id") else None,
             "exchange_status": str(row.get("Status")) if row.get("Status") else None,
@@ -85,5 +93,5 @@ class SupabaseTradeUploader:
             "rejection_reason": order.get("rejection_reason"),
             "uncertainty_reason": order.get("uncertainty_reason"),
             "exchange_response": row or None,
-            "metadata": {},
+            "metadata": {"execution_model": "roostoo-all-or-nothing-v1", "correction": correction},
         }

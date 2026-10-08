@@ -1,5 +1,9 @@
 # Situational Unawareness: Roostoo trading bot
 
+**Agent handoff / next priority:** read [AGENTS.md](AGENTS.md). After the execution
+fix and dashboard server deployment, implement advisory dashboard issue flags.
+The flag UI is explicitly deferred from the current fix.
+
 Team 87's autonomous trading bot for the [Roostoo](https://app.roostoo.com) mock crypto exchange (Roostoo × Susquehanna × AWS Quant Hackathon, live Oct 4–17, 2026). Each team gets $100,000. Bots trade spot longs and 1x shorts, and are judged on return, Sharpe, Sortino and Calmar.
 
 **The strategy is RXM, residual cross-sectional momentum.** Once a day it goes long the coins with the strongest trend after removing their BTC beta and short the weakest, sized by inverse volatility, with a competition lock-in. The full specification and evidence are in [docs/STRATEGY_SPEC.md](docs/STRATEGY_SPEC.md).
