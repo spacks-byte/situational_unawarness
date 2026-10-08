@@ -41,4 +41,6 @@ market_making:
     mm_fraction: 0.90
   allocations:
     PEPE: 1.0
+  refresh_seconds: 180
+  enforce_one_tick_distance: false
   rxm_state_dir: var/rxm-clean

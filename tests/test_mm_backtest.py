@@ -333,6 +333,10 @@ def test_custom_request_normalization_and_live_allocation_policy():
     with pytest.raises(ValueError, match='allocation keys'):
         BacktestRequest.model_validate(req.model_dump() | {'symbols':['BTC']})
     assert MarketMakingConfig(allocations={'PEPE': 1}).allocations == {'PEPE': 1}
+    live = MarketMakingConfig(allocations={'PEPE': 1}, refresh_seconds=180,
+                              enforce_one_tick_distance=False)
+    assert live.refresh_seconds == 180
+    assert not live.enforce_one_tick_distance
     with pytest.raises(ValueError, match='positive fractions'):
         MarketMakingConfig(allocations={'PEPE': 0, 'BONK': 1})
 

@@ -212,7 +212,7 @@ class MarketMakingConfig(_Section):
     # compatible with the original three-book preset and independent tests.
     allocations: dict[str, float] = Field(default_factory=lambda: {
         "PEPE": 0.85, "BONK": 0.075, "1000CHEEMS": 0.075})
-    refresh_seconds: int = Field(default=600, ge=600)
+    refresh_seconds: int = Field(default=600, ge=1)
     warmup_seconds: int = Field(default=3600, ge=3600)
     feature_lag_seconds: int = Field(default=1, ge=1)
     # Midpoint is opt-in so candle-only historical replays remain reproducible.

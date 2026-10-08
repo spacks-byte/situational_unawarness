@@ -43,8 +43,8 @@ Windows/Python install does not need `SSL_CERT_FILE`. RXM never depends on the
 stream: with it down, its closed 15-minute candles arrive through the REST repair
 pass (every 30 s), well inside the bridge's 30-minute late-bar grace. These are
 **Binance reference prices**. The execution coordinator still checks fresh Roostoo
-bid/ask prices before submitting MM orders. The one-second data cadence does not
-change MM's 600-second order refresh or RXM's existing rebalance schedule.
+bid/ask prices before submitting MM orders. The live profile refreshes MM orders
+every 180 seconds (3 minutes); RXM's existing rebalance schedule is unchanged.
 
 Replay uses the same cache with an injected clock and local candle sources, without
 threads or network. It delivers elapsed observations deterministically; it never
@@ -181,8 +181,11 @@ to remove the full-tick minimum distance from the reference while retaining the
 This option does not change the backtest fill-penetration assumption. These are
 opt-in experiment settings; the deployed configuration has not been switched.
 
-Every 600 seconds the engine cancels MM-owned limits by ID, reconciles final fills,
-then calculates replacements. It reserves both sides before submission, without
+Every 180 seconds the live engine cancels MM-owned limits by ID, reconciles final
+fills, then calculates replacements. The live profile does not require a one-tick
+quote distance from the reference price, although exchange tick snapping and the
+minimum fee-covering spread checks still apply. It reserves both sides before
+submission, without
 using anticipated sale proceeds. Prices and sizes stay fixed between refreshes;
 a buy filling mid-interval does not create an immediate sell. MM bypasses RXM's
 repeg and escalation paths. Before submission a fresh venue bid/ask check skips
