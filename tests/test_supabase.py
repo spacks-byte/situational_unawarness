@@ -12,11 +12,18 @@ def canceled():
                  FilledQuantity=10,FilledAverPrice=0,Price=99,CommissionChargeValue=0))
 
 
-def test_telemetry_independently_rejects_phantom_fills():
-    assert SupabaseTradeUploader.transaction(canceled(),environment='live',bot_id='b') is None
-    correction=SupabaseTradeUploader.transaction(canceled(),environment='live',bot_id='b',correction=True)
-    assert correction['status']=='CANCELED' and correction['filled_quantity']==0
-    assert not correction['filled'] and correction['average_fill_price'] is None
+def test_telemetry_records_zero_fill_attempts_without_booking_phantom_fills():
+    telemetry = SupabaseTradeUploader.transaction(canceled(), environment='live', bot_id='b')
+    assert telemetry['status'] == 'CANCELED' and telemetry['filled_quantity'] == 0
+    assert not telemetry['filled'] and telemetry['average_fill_price'] is None
+    assert telemetry['metadata']['telemetry_scope'] == 'order_attempt'
+
+
+def test_telemetry_leaves_active_attempts_unresolved():
+    order = canceled() | {'status': 'PENDING', 'row': canceled()['row'] | {'Status': 'PENDING'}}
+    telemetry = SupabaseTradeUploader.transaction(order, environment='live', bot_id='b')
+    assert telemetry['status'] == 'PENDING'
+    assert telemetry['resolved_at'] is None
 
 
 def test_revision_aware_upload_does_not_acknowledge_a_newer_correction(tmp_path):

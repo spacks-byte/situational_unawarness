@@ -119,11 +119,14 @@ The current profile uses `market_making.capital.mm_fraction: 0.90`; an existing
 `portfolio.db` initialized at 0.70 must be explicitly migrated because the
 coordinator blocks rather than silently moving capital.
 
-Completed orders with at least one confirmed fill are queued in the local
-`portfolio.db` outbox and uploaded to Supabase when `SUPABASE_URL` and
-`SUPABASE_SERVICE_KEY` are present. Rejected orders, canceled orders with zero
-fills, and dry-run orders are not uploaded. Roostoo has no partial executions. Only confirmed full executions are uploaded;
-explicit corrections can replace previously uploaded phantom executions.
+Every live order attempt is queued in the local `portfolio.db` outbox and
+uploaded to Supabase when `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are present.
+This includes `SUBMITTING`, `PENDING`, `FILLED`, `CANCELED`, `REJECTED`, and
+`UNCERTAIN` lifecycle states. Active attempts have a null `resolved_at`; later
+state changes upsert the same `(bot_id, intent_id)` row. Zero-fill rows are
+telemetry only and never create accounting fills. Roostoo has no partial
+executions; explicit corrections can replace previously uploaded phantom
+executions.
 
 The supplied table should be altered before enabling this in production so
 strategy ownership is queryable and retries are idempotent:

@@ -1,4 +1,4 @@
-"""Best-effort, idempotent upload of terminal trade intents to Supabase."""
+"""Best-effort, idempotent upload of trade intent lifecycles to Supabase."""
 from __future__ import annotations
 
 import logging
@@ -58,12 +58,11 @@ class SupabaseTradeUploader:
             # Short endpoints have their own position-shaped accounting contract.
             filled_quantity = float(order.get('filled') or 0)
             average_price = float(order.get('value') or 0) / filled_quantity if filled_quantity else 0
-        if filled_quantity <= 0 and not correction:
-            return None
         filled_value = filled_quantity * average_price
         submitted = order.get("submitted_at")
         submitted_at = (datetime.fromtimestamp(float(submitted), tz=timezone.utc).isoformat()
                         if submitted else None)
+        terminal = status in {"FILLED", "CANCELED", "REJECTED", "UNCERTAIN"}
         return {
             "bot_id": bot_id,
             "environment": environment,
@@ -89,9 +88,13 @@ class SupabaseTradeUploader:
             "exchange_order_id": str(order["order_id"]) if order.get("order_id") else None,
             "exchange_status": str(row.get("Status")) if row.get("Status") else None,
             "submitted_at": submitted_at,
-            "resolved_at": datetime.now(timezone.utc).isoformat(),
+            "resolved_at": datetime.now(timezone.utc).isoformat() if terminal else None,
             "rejection_reason": order.get("rejection_reason"),
             "uncertainty_reason": order.get("uncertainty_reason"),
             "exchange_response": row or None,
-            "metadata": {"execution_model": "roostoo-all-or-nothing-v1", "correction": correction},
+            "metadata": {
+                "execution_model": "roostoo-all-or-nothing-v1",
+                "correction": correction,
+                "telemetry_scope": "order_attempt",
+            },
         }

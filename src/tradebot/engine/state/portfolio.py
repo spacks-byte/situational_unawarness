@@ -86,20 +86,21 @@ class PortfolioStore:
     def save(self, kind, payload=None):
         # Keep active state bounded over long runs; history and accounting commit
         # together. Restore the durable state if a write fails (e.g. full disk).
-        completed = [o for o in self.state["orders"].values() if o["status"] in TERMINAL]
+        orders = list(self.state["orders"].values())
+        completed = [o for o in orders if o["status"] in TERMINAL]
         active_state = dict(self.state, orders={k: o for k, o in self.state["orders"].items()
-                                               if o["status"] not in TERMINAL})
+                                           if o["status"] not in TERMINAL})
         try:
             with self.db:
+                for order in orders:
+                    if self.trade_uploader is not None and self.environment == "live":
+                        transaction = SupabaseTradeUploader.transaction(
+                            order, environment=self.environment, bot_id=self.bot_id)
+                        self.queue_upload(order["intent_id"], transaction)
                 for order in completed:
                     self.db.execute("INSERT OR REPLACE INTO completed_orders VALUES (?,?,?,?)",
                                     (order["intent_id"], order.get("order_id"), order["strategy"],
                                      json.dumps(order, allow_nan=False)))
-                    transaction = (SupabaseTradeUploader.transaction(
-                        order, environment=self.environment, bot_id=self.bot_id)
-                        if self.trade_uploader is not None and self.environment == "live" else None)
-                    if transaction is not None:
-                        self.queue_upload(order["intent_id"], transaction)
                 self.db.execute("INSERT OR REPLACE INTO portfolio VALUES (1, ?)",
                                 (json.dumps(active_state, allow_nan=False),))
                 self.db.execute("INSERT INTO events(timestamp,kind,payload) VALUES(?,?,?)",
