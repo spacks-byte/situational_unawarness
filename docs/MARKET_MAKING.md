@@ -49,7 +49,7 @@ every 270 seconds; RXM's existing rebalance schedule is unchanged.
 The MM quote policy uses a 30-second signal-decay constant, 30-second alpha EWMA
 half-life, 300-second volatility EWMA half-life, a 330-second signal horizon,
 and a 270-second quote refresh. Its volatility-spread and inventory-skew
-coefficients are 100.0 and 7.5 respectively. The extra one-tick minimum is
+coefficients are 100.0 and 30.0 respectively. The extra one-tick minimum is
 disabled; outward tick rounding and the existing fee/spread filters remain
 active. Sizing, `c2`, and inventory limits are unchanged.
 

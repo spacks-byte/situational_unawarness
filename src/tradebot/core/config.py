@@ -217,7 +217,7 @@ class MarketMakingConfig(_Section):
     refresh_seconds: int = Field(default=600, ge=1)
     quote_refresh_seconds: int = Field(default=270, ge=1)
     volatility_spread_coefficient: float = Field(default=100.0, gt=0)
-    inventory_skew_coefficient: float = Field(default=7.5, gt=0)
+    inventory_skew_coefficient: float = Field(default=30.0, gt=0)
     signal_horizon_seconds: int = Field(default=330, ge=1)
     warmup_seconds: int = Field(default=3600, ge=3600)
     feature_lag_seconds: int = Field(default=1, ge=1)

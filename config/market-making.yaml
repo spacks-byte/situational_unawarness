@@ -47,7 +47,7 @@ market_making:
     PEPE: 1.0
   quote_refresh_seconds: 270
   volatility_spread_coefficient: 100.0
-  inventory_skew_coefficient: 7.5
+  inventory_skew_coefficient: 30.0
   signal_horizon_seconds: 330
   enforce_one_tick_distance: false
   inventory_fraction: 0.40
