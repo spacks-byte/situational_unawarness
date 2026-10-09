@@ -70,8 +70,6 @@ def _live_overrides(args, settings: Settings) -> Settings:
 
 
 def _live_command(args, settings: Settings) -> int:
-    from tradebot.live.runner import LiveRunner
-
     if args.live and os.environ.get("ROOSTOO_CONFIRM_LIVE") != "YES":
         print("--live sends real orders: set ROOSTOO_CONFIRM_LIVE=YES in the environment to confirm", file=sys.stderr)
         return 2
@@ -86,10 +84,11 @@ def _live_command(args, settings: Settings) -> int:
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
     logging.getLogger().addHandler(handler)
     try:
-        if settings.market_making.enabled:
+        if settings.market_making.enabled or "cointegration-pairs" in settings.live.strategies:
             from tradebot.live.account import AccountRunner
             runner = AccountRunner(settings, mode="live" if args.live else "dry-run")
         else:
+            from tradebot.live.runner import LiveRunner
             runner = LiveRunner(settings, mode="live" if args.live else "dry-run")
     except (RuntimeError, ValueError) as e:
         print(f"[ERROR] {e}", file=sys.stderr)
