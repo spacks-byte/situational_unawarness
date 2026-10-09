@@ -9,6 +9,7 @@ import pytest
 
 from tradebot.core.clock import SimClock
 from tradebot.core.cointegration import CointegrationConfig
+from tradebot.live.account import AccountRunner
 from tradebot.live.pairs import PairRuntime
 from tradebot.strategy.library.cointegration import STEP
 
@@ -180,3 +181,27 @@ def test_execute_pending_books_runtime_and_owner_callback_payload(tmp_path):
     assert not runtime.pending()
     assert len(runtime.ledger.positions()) == 2
     runtime.close()
+
+
+def test_market_fill_namespaces_reused_venue_order_ids():
+    runner = AccountRunner.__new__(AccountRunner)
+    runner.clock = SimClock(pd.Timestamp("2026-01-01T00:00:00Z"))
+    response = {
+        "Success": True,
+        "OrderDetail": {
+            "OrderID": 17,
+            "Status": "FILLED",
+            "FilledQuantity": 2,
+            "FilledAverPrice": 100,
+        },
+    }
+    first = runner._market_fill(
+        response, "A", "FIL", "long", "open", {"intent_id": "intent-1"})
+    second = runner._market_fill(
+        response, "A", "FIL", "long", "open", {"intent_id": "intent-2"})
+    repeat = runner._market_fill(
+        response, "A", "FIL", "long", "open", {"intent_id": "intent-1"})
+    assert first["fill_id"] == "cointegration:intent-1:A:17"
+    assert second["fill_id"] == "cointegration:intent-2:A:17"
+    assert first["fill_id"] != second["fill_id"]
+    assert repeat["fill_id"] == first["fill_id"]

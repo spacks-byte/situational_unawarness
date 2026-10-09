@@ -434,7 +434,11 @@ class AccountRunner:
         short = side == "short"
         fee_key = "OpenFee" if action == "open" and short else "CloseFee" if short else None
         fee = float(detail.get("CommissionChargeValue", detail.get(fee_key, 0) if fee_key else 0))
-        return dict(leg=leg, fill_id=str(detail.get("OrderID", detail.get("ID", f"{intent['intent_id']}:{leg}"))),
+        venue_id = detail.get("OrderID", detail.get("ID"))
+        if venue_id is None:
+            venue_id = "unidentified"
+        fill_id = f"cointegration:{intent['intent_id']}:{leg}:{venue_id}"
+        return dict(leg=leg, fill_id=fill_id,
                     symbol=symbol, side=side, action=action, quantity=quantity, price=price,
                     timestamp=self.clock.now(), fee=fee, slippage=0.,
                     venue_realized_pnl=float(detail["RealizedPNL"]) if "RealizedPNL" in detail else None)
