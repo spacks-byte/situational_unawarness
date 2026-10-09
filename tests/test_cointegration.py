@@ -151,3 +151,32 @@ def test_failed_decision_commit_and_restart_between_leg_fills(tmp_path):
     runtime.fill_reference(ts+STEP, {c: float(f.loc[ts+STEP, "open"]) for c, f in data.items()})
     assert len(runtime.ledger.positions()) == 2 and not runtime.pending()
     runtime.close()
+
+
+def test_execute_pending_books_runtime_and_owner_callback_payload(tmp_path):
+    config, data, _ = fixture()
+    clock = SimClock(config.cycle_start)
+    runtime = PairRuntime(config, tmp_path / "pairs.db", clock=clock)
+    runtime.initialize(data)
+    ts = pd.Timestamp(config.cycle_start)
+    clock.advance(1800)
+    runtime.process_close(ts, {c: float(f.loc[ts, "close"]) for c, f in data.items()})
+    ts += STEP
+    clock.advance(1800)
+    runtime.process_close(ts, {c: float(f.loc[ts, "close"]) for c, f in data.items()})
+    intent = runtime.pending()[0]
+    target = intent["target"]
+    fills = []
+    for leg in ("A", "B"):
+        short = (target == -1) == (leg == "A")
+        fills.append(dict(
+            leg=leg, fill_id=f"venue:{leg}", symbol=intent["pair"].split("-")[leg == "B"],
+            side="short" if short else "long", action="open", quantity=1., price=100.,
+            timestamp=ts + STEP, fee=0., slippage=0., venue_realized_pnl=None))
+    owner_callbacks = []
+    runtime.execute_pending(lambda current, positions: fills,
+                            lambda current, fill: owner_callbacks.append(fill["fill_id"]))
+    assert owner_callbacks == ["venue:A", "venue:B"]
+    assert not runtime.pending()
+    assert len(runtime.ledger.positions()) == 2
+    runtime.close()

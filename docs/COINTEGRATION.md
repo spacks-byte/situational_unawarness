@@ -1,9 +1,9 @@
 # Cointegration integration: steps 1–3
 
-`cointegration-pairs` is available in the shared account runner as an **observation-only**
-strategy. It persists decisions but cannot place, cancel or close exchange orders.
-The subsequent execution adapter should submit market orders. Dashboard integration
-and that adapter are not part of this change.
+`cointegration-pairs` supports observation and explicitly enabled live execution.
+The default configuration is execution-capable, but dry-run and replay modes never
+submit orders. A live run must also set `cointegration.execution: execute`,
+provide a bounded `cycle_end`, and pass the existing live confirmation guard.
 
 ## Implemented behavior
 
@@ -133,20 +133,26 @@ extra close needed for volatility, and 14 days for restart catch-up. The existin
 disk-store retention remains separately configurable; older warmup can be restored
 over REST. Offline shared replays use local 30m Parquet only and never download.
 
-Use `config/cointegration-observe.yaml` as an example. Set `cycle_start` explicitly
-to the intended UTC half-hour boundary; set `cycle_end` for a bounded experiment.
+Use `config/cointegration-live.yaml` for the active cointegration-only profile, or
+`config/cointegration-observe.yaml` for a non-mutating observation run. Set
+`cycle_start` explicitly to the intended UTC half-hour boundary and always set
+`cycle_end` for a bounded cycle.
 The reference capital is a virtual observation budget, not permission to transfer
 money from another strategy. The existing physical account still has its configured
-MM/RXM allocations. No new live capital share or automatic refit/compounding policy
-has been selected.
+MM/RXM allocations. The active profile disables market making and RXM and sets the MM allocation to
+zero, leaving 100% of reconciled equity available to cointegration owners. No
+automatic refit or compounding policy has been selected.
 
 For an account with an existing shared runner, add `cointegration-pairs` to that
 runner's roster and configure its cycle; do not start a second process on the same
 account. It uses the same market producer and account lock. `PAUSE_PAIRS` pauses
 its decisions. Observation state is stored at
 `<state_dir>/cointegration-pairs/observation.db`, separate from physical ownership.
-Unexecuted intents remain pending, including after the final observation candle;
+Unexecuted intents remain pending, including after the final cycle candle;
 `finished` means the requested candle interval was consumed, not that orders filled.
+Execution submits both market legs, requires confirmed fills, and compensates a
+completed first leg if the second leg is rejected. Confirmed fills are written to
+the shared owner ledger as well as the pair runtime.
 
 ## Strategy/pair/leg ownership
 

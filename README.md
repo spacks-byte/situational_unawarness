@@ -36,10 +36,10 @@ python -m tradebot desk --port 8766                      # interactive Supabase 
 python -m tradebot data                                 # download candles (~640 MB per year)
 python -m tradebot backtest --strategy rxm --params k=3,tilt=0.3,buffer=2 --windows --window-days 14
 
-# The bot (config/competition.yaml = RXM competition settings)
-python -m tradebot --config config/competition.yaml replay --days 7              # simulate on past candles
-python -m tradebot --config config/competition.yaml live --state-dir var/dry     # dry run: reads, never sends
-ROOSTOO_CONFIRM_LIVE=YES python -m tradebot --config config/competition.yaml live --live --state-dir var/live_comp
+# The bot (cointegration is the active strategy; RXM and MM are benched)
+python -m tradebot --config config/cointegration-live.yaml replay --days 7       # simulate on past candles
+python -m tradebot --config config/cointegration-live.yaml live --state-dir var/dry  # dry run: reads, never sends
+ROOSTOO_CONFIRM_LIVE=YES python -m tradebot --config config/cointegration-live.yaml live --live
 ```
 
 Settings live in [config/default.yaml](config/default.yaml), with competition overrides in [config/competition.yaml](config/competition.yaml). API keys go only in `.env`. Operating the bot: [docs/LIVE_RUNBOOK.md](docs/LIVE_RUNBOOK.md).

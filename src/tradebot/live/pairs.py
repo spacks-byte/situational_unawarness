@@ -72,6 +72,31 @@ class PairRuntime:
         return [dict(json.loads(p), intent_id=i, status=s) for i, s, p in self.db.execute(
             "SELECT intent_id,status,payload FROM pair_intents WHERE status='PENDING' ORDER BY intent_id")]
 
+    def execute_pending(self, executor, on_fill=None):
+        """Execute pending whole-pair intents through an injected venue adapter.
+
+        The adapter must submit both legs and return two confirmed fill dictionaries.
+        It owns compensation if the second leg cannot be completed; this runtime only
+        books confirmed, all-or-nothing pair outcomes.
+        """
+        results = []
+        for intent in self.pending():
+            positions = self.ledger.positions(self.name, intent["pair"])
+            fills = executor(intent, positions)
+            expected = 2 - len(intent["completed_legs"])
+            if len(fills) != expected:
+                raise ValueError(f"pair adapter returned {len(fills)} fills for {intent['pair']}; expected {expected}")
+            for fill in fills:
+                leg = fill["leg"]
+                self.record_fill(
+                    intent["intent_id"], leg,
+                    **{k: v for k, v in fill.items()
+                       if k in {"fill_id", "quantity", "price", "timestamp", "fee", "slippage"}})
+                if on_fill is not None:
+                    on_fill(intent, fill)
+            results.append(intent["intent_id"])
+        return results
+
     def process_close(self, candle, closes):
         """Consume a single synchronized completed candle, atomically with intents."""
         if self.state is None:

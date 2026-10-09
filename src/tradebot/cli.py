@@ -62,8 +62,8 @@ def _live_overrides(args, settings: Settings) -> Settings:
         names = live["strategies"]
         if not names or len(names) != len(set(names)) or any(n not in {"rxm", "mm-10m-fluctuation", "cointegration-pairs"} for n in names):
             raise ValueError("--strategies requires unique rxm / mm-10m-fluctuation / cointegration-pairs names")
-        if not settings.market_making.enabled and names != ["rxm"]:
-            raise ValueError("MM/account selection requires --config config/market-making.yaml")
+        if not settings.market_making.enabled and names not in (["rxm"], ["cointegration-pairs"]):
+            raise ValueError("select only RXM or cointegration-pairs when market making is disabled")
         if len(names) == 1:
             live["strategy"] = names[0]
     return settings.model_copy(update={"live": settings.live.model_copy(update=live)}) if live else settings

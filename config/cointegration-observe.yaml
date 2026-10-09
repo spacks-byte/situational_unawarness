@@ -5,10 +5,12 @@ live:
   state_dir: var/pairs-observation
   market_store_dir: var/market
 market_making:
-  enabled: true  # selects the existing shared-account host; MM is not in the roster
+  enabled: false
+  capital:
+    mm_fraction: 0.0
   rxm_state_dir: var/no-legacy-import
 cointegration:
-  execution: observe
+  execution: observe  # use execute only with an explicitly confirmed live run
   intended_order_type: MARKET
   reference_capital: 10000
   cycle_start: "2026-10-01T00:00:00Z"  # e.g. "2026-10-10T00:00:00Z"; choose deliberately

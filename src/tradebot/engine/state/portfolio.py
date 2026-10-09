@@ -1137,7 +1137,7 @@ class AccountCoordinator:
 
 
 class StrategyAccountPort:
-    """Owner-scoped reads; order submission remains MM/RXM-only until step 4."""
+    """Owner-scoped reads and legacy strategy order transport."""
     def __init__(self, account, strategy, pair_id=None):
         if pair_id is not None and strategy in LEGACY:
             raise ValueError("legacy transport is strategy-scoped; use owned_positions for leg reads")

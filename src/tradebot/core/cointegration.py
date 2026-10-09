@@ -31,8 +31,7 @@ class PairSpec(BaseModel):
 
 class CointegrationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-    # Phase 1 supports observation/replay only; selecting it cannot submit orders.
-    execution: Literal["observe"] = "observe"
+    execution: Literal["observe", "execute"] = "execute"
     intended_order_type: Literal["MARKET"] = "MARKET"
     cycle_start: datetime | None = None
     cycle_end: datetime | None = None

@@ -106,8 +106,11 @@ class AccountRunner:
         if settings.fees.spot_maker != 0.0005:
             raise ValueError("MM preset requires the 5 bps spot maker fee")
         self.strategy_names = selected_strategies(settings)
-        if CointegrationPairs.name in self.strategy_names and settings.cointegration.cycle_start is None:
-            raise ValueError("cointegration-pairs requires an explicit cointegration.cycle_start")
+        if CointegrationPairs.name in self.strategy_names:
+            if settings.cointegration.cycle_start is None:
+                raise ValueError("cointegration-pairs requires an explicit cointegration.cycle_start")
+            if settings.cointegration.cycle_end is None:
+                raise ValueError("cointegration-pairs requires an explicit cointegration.cycle_end")
         self.settings, self.mode = settings, mode
         self.clock = clock or RealClock()
         self.state_dir = Path(settings.live.state_dir)
@@ -176,8 +179,7 @@ class AccountRunner:
             for name in self.strategy_names:
                 strategy_class = STRATEGIES[name]
                 if strategy_class.output_kind == "pairs":
-                    # Reference budgets and virtual fills never enter the physical
-                    # account books. Step 4 will supply the live fill adapter.
+                    # Pair execution is enabled only for an explicitly confirmed live run.
                     self.runtimes[name] = PairRuntime(settings.cointegration,
                         self.state_dir / name / "observation.db", clock=self.clock,
                         fetch=self.market_data.fetch("30m"))
@@ -279,6 +281,14 @@ class AccountRunner:
                         else:
                             runtime = self.runtimes[name]
                             strategy_results[name] = runtime.run_once() or {"status": "PAUSED"}
+                            if (isinstance(runtime, PairRuntime)
+                                    and self.settings.cointegration.execution == "execute"
+                                    and self.mode == "live"):
+                                self._ensure_pair_owners(runtime)
+                            if (isinstance(runtime, PairRuntime)
+                                    and self.settings.cointegration.execution == "execute"
+                                    and self.mode == "live"):
+                                runtime.execute_pending(self._execute_pair_intent, self._record_pair_fill)
                             if getattr(runtime, "failures", 0):
                                 raise RuntimeError(runtime.last_error)
                         self.strategy_failures[name] = 0
@@ -326,6 +336,108 @@ class AccountRunner:
             "market_data": self.market_data.status(),
         })
         return result
+
+    def _ensure_pair_owners(self, runtime):
+        strategy = CointegrationPairs.name
+        existing = self.store.ownership.accounts(strategy)
+        pair_ids = set(runtime.state["models"])
+        if existing:
+            if {row["pair_id"] for row in existing} != pair_ids:
+                raise ValueError("saved cointegration ownership does not match configured pairs")
+            return
+        total = sum(model["budget"] for model in runtime.state["models"].values())
+        available = self.account.state["rxm_capital"]
+        if total <= 0 or available <= 0:
+            raise ValueError("cointegration execution has no available account capital")
+        scale = available / total
+        for pair, model in runtime.state["models"].items():
+            self.account.allocate_owner(strategy, pair, model["budget"] * scale)
+
+    def _execute_pair_intent(self, intent, positions):
+        target = int(intent["target"])
+        opening = target != 0
+        if self.account.blocked or self.account.paused(CointegrationPairs.name):
+            raise RuntimeError("cointegration execution is blocked or paused")
+        owned = {position["leg"]: position for position in positions}
+        fills = []
+        try:
+            for leg, symbol in zip(("A", "B"), intent["pair"].split("-")):
+                if leg in intent["completed_legs"]:
+                    continue
+                if opening:
+                    short_open = (target == -1) == (leg == "A")
+                    if short_open:
+                        response = self.throttled.open_short(symbol, intent["budget"] / 2)
+                        side = "short"
+                    else:
+                        ticker = self.throttled.get_ticker(f"{symbol}/USD")
+                        price = float(ticker["Data"][f"{symbol}/USD"]["LastPrice"])
+                        response = self.throttled.place_order(
+                            symbol, "BUY", intent["budget"] / 2 / price, order_type="MARKET")
+                        side = "long"
+                    action = "open"
+                else:
+                    position = owned[leg]
+                    side = position["side"]
+                    if side == "long":
+                        response = self.throttled.place_order(
+                            symbol, "SELL", position["quantity"], order_type="MARKET")
+                    else:
+                        response = self.throttled.close_short(symbol, close_qty=position["quantity"])
+                    action = "close"
+                fills.append(self._market_fill(response, leg, symbol, side, action, intent))
+        except Exception:
+            for fill in reversed(fills):
+                self._compensate_pair_fill(fill)
+            raise
+        return fills
+
+    def _record_pair_fill(self, intent, fill):
+        fill_id = fill["fill_id"]
+        owner_fields = {
+            key: fill[key]
+            for key in (
+                "leg", "symbol", "side", "action", "quantity", "price",
+                "fee", "slippage", "collateral",
+            )
+            if key in fill
+        }
+        self.account.record_owned_fill(
+            fill_id, strategy=CointegrationPairs.name, pair_id=intent["pair"],
+            **owner_fields)
+
+    def _compensate_pair_fill(self, fill):
+        symbol = fill["symbol"]
+        if fill["action"] == "open" and fill["side"] == "long":
+            response = self.throttled.place_order(symbol, "SELL", fill["quantity"], order_type="MARKET")
+        elif fill["action"] == "open":
+            response = self.throttled.close_short(symbol, close_qty=fill["quantity"])
+        elif fill["side"] == "long":
+            response = self.throttled.place_order(symbol, "BUY", fill["quantity"], order_type="MARKET")
+        else:
+            response = self.throttled.open_short(symbol, fill["quantity"] * fill["price"])
+        if response.get("Success") is False:
+            raise RuntimeError(f"failed to compensate pair leg {fill['leg']}: {response.get('ErrMsg', 'unknown error')}")
+
+    def _market_fill(self, response, leg, symbol, side, action, intent):
+        if response.get("Success") is False:
+            raise RuntimeError(response.get("ErrMsg", "pair market order rejected"))
+        detail = response.get("OrderDetail", response)
+        status = str(detail.get("Status", response.get("Status", ""))).upper()
+        if status not in {"FILLED", "OPEN"} and not (
+                action == "close" and float(detail.get("ClosedQty", 0) or 0) > 0):
+            raise RuntimeError(f"pair market order was not confirmed: {status or 'unknown status'}")
+        quantity = float(detail.get("FilledQuantity", detail.get("ShortQty", detail.get("ClosedQty", 0))))
+        price = float(detail.get("FilledAverPrice", detail.get("EntryPrice", detail.get("ClosePrice", 0))))
+        if quantity <= 0 or price <= 0:
+            raise RuntimeError("pair market order returned no confirmed fill")
+        short = side == "short"
+        fee_key = "OpenFee" if action == "open" and short else "CloseFee" if short else None
+        fee = float(detail.get("CommissionChargeValue", detail.get(fee_key, 0) if fee_key else 0))
+        return dict(leg=leg, fill_id=str(detail.get("OrderID", detail.get("ID", f"{intent['intent_id']}:{leg}"))),
+                    symbol=symbol, side=side, action=action, quantity=quantity, price=price,
+                    timestamp=self.clock.now(), fee=fee, slippage=0.,
+                    venue_realized_pnl=float(detail["RealizedPNL"]) if "RealizedPNL" in detail else None)
 
     def stop(self, *_):
         self._stop.set()
